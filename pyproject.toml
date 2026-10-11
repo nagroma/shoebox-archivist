@@ -1,0 +1,45 @@
+[project]
+name = "shoebox-archivist"
+version = "0.1.0"
+description = "Family photo manager: face recognition, fuzzy dates, photo backs"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.143.0",
+    "insightface>=2.1",
+    "numpy>=2.5.3",
+    "onnxruntime>=1.31.0 ; sys_platform == 'darwin'",
+    "onnxruntime-gpu>=1.31.0 ; sys_platform != 'darwin'",
+    # CUDA 13 + cuDNN 9 runtime DLLs for onnxruntime-gpu (no system CUDA install needed).
+    # cuBLAS 13.8.1+ has no Windows wheel yet.
+    "nvidia-cuda-runtime>=13,<14 ; sys_platform == 'win32'",
+    "nvidia-cublas>=13,<13.8.1 ; sys_platform == 'win32'",
+    "nvidia-cufft>=12,<13 ; sys_platform == 'win32'",
+    "nvidia-cudnn-cu13>=9,<10 ; sys_platform == 'win32'",
+    "opencv-python>=5.0.0.93",
+    "pillow>=12.3.0",
+    "python-multipart>=0.0.32",
+    "reverse-geocoder>=1.5.1",
+    "scikit-learn>=1.9.1",
+    "uvicorn[standard]>=0.54.0",
+    "pyexiv2>=2.16.0",
+]
+
+[tool.uv]
+# insightface depends on CPU onnxruntime, which shadows onnxruntime-gpu.
+# Only allow the CPU build on macOS (which uses CoreML/CPU).
+override-dependencies = ["onnxruntime; sys_platform == 'darwin'"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[project.scripts]
+pm = "backend.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["backend"]

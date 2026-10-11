@@ -1,0 +1,30 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+data/
+node_modules/
+*.lrcat
+photos/
+photos-am/
+frontend/dist/
+*.lrdata/
+.DS_Store
+
+# Never commit photos, wherever they are
+*.jpg
+*.jpeg
+*.png
+*.tif
+*.tiff
+*.heic
+*.dng
+*.bmp
+*.webp
+*.nef
+*.cr2
+*.cr3
+*.arw
+
+# Library vocabulary: real names, never commit
+Keywords.txt
