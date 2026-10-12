@@ -68,7 +68,15 @@ Everyone who appears in your photos, with photo and face counts.
 - **Open a person** to:
   - Set **birth/death years**. The app then won't suggest them in photos dated outside their lifetime.
   - Review their **suggested faces**: select the wrong ones, reject them, and confirm the rest.
+  - **Name used from** (next to Born/Died): the year the main name came into use. Leave it blank for a name that was always theirs. Example: the main name "Ruth Morgan" with *Name used from 1984* and an *Other name* "Ruth Mulligan" (birth) shows Ruth Mulligan on photos dated before 1984 and Ruth Morgan after. If the year is unknown, she simply shows as Ruth Morgan everywhere.
+  - **Notes** are for you only: they stay in the app and are never written to your photo files.
+  - Add **Other names** (married name, nickname) with the year each started. The keyword in your files keeps the main name; the app shows the name that fits the photo's date, and typing any of the names finds the person.
+  - Fill in the **Family** card: add a person's parents, partners and children (type a name; new people are created). Siblings appear on their own from a shared parent. Everyone connected is then labelled relative to the library's **curator** (Parent, Grandparent, Aunt/Uncle, 1st cousin, Partner's parent...), shown on the People cards and the person's page. Set the curator on the **Library** page first.
+  - Click **Family tree** to see their family drawn out: parents above, children below, partners side by side. Pick 1-4 generations, click anyone to centre the tree on them, or click **Photos of this family** to list every photo containing someone in that circle. The **Tree** tab shows the curator's tree.
+  - On the **Tree** page, **Branch keywords** writes `Family|Morgan`, `Family|Mulligan`... into the photos so a family can be searched in Bridge. A person gets the branch of every top ancestor they descend from, so a child of two families has both. A married-in partner keeps their own branch (so Jennifer Driver stays `Morgan`). Review the preview, then click **Write branch keywords to photos**. After that first time, naming a person on a photo updates that photo's branch keywords automatically; re-run the button after changing family links. A married-in partner (like a husband outside the curator's family) gets only their own branch; the blood relative gets both. `pm strip` removes them.
   - Choose a **cover** face, **merge** two people who are really the same person, or delete a person.
+
+**Deleting a mistake keyword** (e.g. a stray "Jenni"): if a person was created by mistake, open them and click **Delete person**; their unused keywords go with them. Any other keyword that is on no photo appears under **Library → Unused keywords** with a × to delete it. A keyword that is on photos must first be removed from those photos.
 
 ---
 
@@ -86,6 +94,13 @@ Faces that haven't been confirmed yet, grouped into **clusters** of faces that l
 1. Check a cluster. Select any face that doesn't belong and click **Remove from cluster**.
 2. Type a name (or pick the suggested one) to name the whole cluster at once.
 3. **Ignore** faces not worth naming: strangers, statues, paintings, bad detections. Ignored faces are listed at the bottom and can be restored.
+
+**Strangers, background people, and faces you can't identify** (blurry, turned away, too small): click **Ignore**. Don't create a person like "Unknown" for them.
+- Ignored faces are left out of clustering, matching and suggestions, so they stop cluttering the review.
+- They stay listed at the bottom of the Faces page, so a wrong call can be **restored** later.
+- Ignoring only hides the face from the app's naming; it doesn't change the photo file.
+- If someone you *do* know is just hard to see, leave the face unnamed rather than ignored; it can be named later when you have more context.
+- A person who matters to the photo but whose name you don't know can be added as a normal person (e.g. "Unidentified man, Grandma's wedding") so you can find those photos later.
 
 **Tips:**
 - **Double-click** a face, or click 🔍, to see the whole photo with that face outlined. From there, **Open photo page ↗** jumps to the photo.

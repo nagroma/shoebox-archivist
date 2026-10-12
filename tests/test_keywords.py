@@ -6,7 +6,7 @@ import pytest
 
 from backend import actions, db, keywords, xmp
 
-SAMPLE = Path(__file__).resolve().parent.parent / "photos" / "12_112mm_Rounded_Coarse" / \
+SAMPLE = Path(__file__).resolve().parent.parent / "photos-mt" / "12_112mm_Rounded_Coarse" / \
     "112mm_Rounded_Coarse_0002_a.jpg"
 needs_sample = pytest.mark.skipif(not SAMPLE.exists(), reason="sample photo not present")
 

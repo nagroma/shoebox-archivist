@@ -52,6 +52,7 @@ export function FileMetadata({ photoId }: { photoId: number }) {
         Marked <span className="tag-badge app">app</span> / <span className="tag-badge changed">changed</span> /{' '}
         <span className="tag-badge managed">managed</span> = written by this app, changed by it, or updated by it when you edit.
       </p>}
+      {data?.warning && <p className="hint error">{data.warning}</p>}
       {data && Object.entries(data.tags).map(([group, tags]) => {
         const byNs = new Map<string, [string, unknown][]>()
         for (const [k, v] of Object.entries(tags)) {

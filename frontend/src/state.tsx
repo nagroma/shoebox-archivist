@@ -30,7 +30,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const resolvePerson = useCallback((text: string): PersonRef | null => {
     const t = text.trim()
     if (!t) return null
-    const hit = people.find(p => p.name.toLowerCase() === t.toLowerCase())
+    const low = t.toLowerCase()
+    const hit = people.find(p => p.name.toLowerCase() === low) ??
+      people.find(p => p.aliases?.some(a => a.name.toLowerCase() === low))
     return hit ? { person_id: hit.id } : { name: t }
   }, [people])
 

@@ -14,7 +14,7 @@ import os
 import sqlite3
 from pathlib import Path
 
-from . import actions, baseline, cluster, config, dates, db, ingest, match, xmp
+from . import actions, baseline, cluster, config, dates, db, ingest, library, match, xmp
 
 DATA = Path(os.environ.get("PM_DATA", Path(__file__).resolve().parent.parent / "data"))
 
@@ -166,7 +166,12 @@ def cmd_serve(conn, args):
     import webbrowser
     import uvicorn
     from . import api
-    api.DB_PATH = args.db
+    if args.explicit_data:
+        library.use_data_dir(args.db.parent)
+    else:  # the last library used, else an older ./data folder, else the setup page
+        library.open_startup(DATA)
+    shown = library.data_dir()
+    print(f"Library data: {shown if shown else 'none yet - choose a folder in the web UI'}")
     url = f"http://127.0.0.1:{args.port}"
     print(f"Shoebox Archivist running at {url}  (Ctrl+C to stop)")
     if not args.no_browser:
@@ -189,7 +194,10 @@ def cmd_status(conn, args):
 
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="pm", description="Family photo manager - prototype CLI")
-    p.add_argument("--db", type=Path, default=DATA / "library.db")
+    p.add_argument("--db", type=Path, default=None,
+                   help="database file (default: PM_DATA or ./data; 'serve' opens the last library)")
+    p.add_argument("--library", type=Path, default=None,
+                   help="photo folder whose .shoebox data folder to use")
     p.add_argument("--threshold", type=float, default=None,
                    help="cosine similarity needed to suggest a name (default: from Settings)")
     p.add_argument("--min-size", type=int, default=None,
@@ -256,6 +264,15 @@ def main(argv: list[str] | None = None) -> None:
     s.set_defaults(func=cmd_serve)
 
     args = p.parse_args(argv)
+    global DATA
+    if args.library:
+        DATA = library.data_dir_for(args.library.resolve())
+    args.explicit_data = bool(args.library or args.db or os.environ.get("PM_DATA"))
+    if args.db is None:
+        args.db = DATA / "library.db"
+    if args.cmd == "serve" and not args.explicit_data:
+        args.func(None, args)  # may start without any library
+        return
     conn = db.connect(args.db)
     try:
         args.func(conn, args)

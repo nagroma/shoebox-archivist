@@ -5,7 +5,7 @@ import sqlite3
 import sys
 from collections.abc import Iterable
 
-from . import dates, db, keywords, match, xmp
+from . import dates, db, family, keywords, match, xmp
 
 
 def _many(conn: sqlite3.Connection, sql: str, ids: Iterable[int], *extra) -> None:
@@ -82,6 +82,75 @@ def _sync_keywords(conn: sqlite3.Connection, pairs: set[tuple[int, int]]) -> Non
             for (kid,) in conn.execute("SELECT id FROM keywords WHERE person_id = ?", (person_id,)).fetchall():
                 remove_photo_keyword(conn, photo_id, kid)
     conn.commit()
+    auto_branches(conn, {p for p, _ in pairs})
+
+
+BRANCH_SETTING = "branch_keyword_ids"
+
+
+def sync_branch_keywords(conn: sqlite3.Connection, apply: bool = False,
+                         photo_ids: set[int] | None = None) -> dict:
+    """Give each photo a `Family|<Branch>` keyword for every family branch of the people in it
+    (confirmed faces and person keywords). Keywords this function created are remembered, so
+    ones that stop applying (the tree changed) are removed again - only if this app wrote them.
+    With apply=False nothing is changed; the result says what would be. `photo_ids` limits it
+    to those photos."""
+    import json
+    branch_of = family.branches(conn)
+    cat = next((f["name"] for f in keywords.get_facets(conn) if f["name"].lower() == "family"), "Family")
+
+    per_photo: dict[int, set[int]] = {}
+    for r in conn.execute("SELECT i.photo_id, f.person_id FROM faces f JOIN images i ON i.id = f.image_id "
+                          "WHERE f.status = 'confirmed' AND f.person_id IS NOT NULL"):
+        per_photo.setdefault(r["photo_id"], set()).add(r["person_id"])
+    for r in conn.execute("SELECT pk.photo_id, k.person_id FROM photo_keywords pk JOIN keywords k "
+                          "ON k.id = pk.keyword_id WHERE k.person_id IS NOT NULL"):
+        per_photo.setdefault(r["photo_id"], set()).add(r["person_id"])
+    if photo_ids is not None:
+        per_photo = {ph: ps for ph, ps in per_photo.items() if ph in photo_ids}
+    wanted = {ph: {b for p in people for b in branch_of.get(p, ())} for ph, people in per_photo.items()}
+    wanted = {ph: bs for ph, bs in wanted.items() if bs}
+
+    managed = set(json.loads(db.get_setting(conn, BRANCH_SETTING) or "[]"))
+    have: dict[int, dict[str, str]] = {}   # photo -> {branch name: source} for Family keywords
+    for r in conn.execute("SELECT pk.photo_id, pk.source, k.id, k.name FROM photo_keywords pk "
+                          "JOIN keywords k ON k.id = pk.keyword_id WHERE k.category = ?", (cat,)):
+        if photo_ids is not None and r["photo_id"] not in photo_ids:
+            continue
+        if r["id"] in managed or r["source"] == "file":
+            have.setdefault(r["photo_id"], {})[r["name"]] = (r["id"], r["source"])
+
+    to_add = [(ph, b) for ph, bs in wanted.items() for b in bs if b not in have.get(ph, {})]
+    to_remove = [(ph, b) for ph, cur in have.items() for b, (kid, src) in cur.items()
+                 if kid in managed and src == "app" and b not in wanted.get(ph, set())]
+    counts: dict[str, int] = {}
+    for bs in wanted.values():
+        for b in bs:
+            counts[b] = counts.get(b, 0) + 1
+    result = {"category": cat, "branches": counts, "photos": len(wanted),
+              "add": len(to_add), "remove": len(to_remove), "applied": False}
+    if not apply:
+        return result
+
+    done_add = done_rm = 0
+    for ph, b in to_add:
+        kid = keywords.ensure(conn, cat, b)
+        managed.add(kid)
+        done_add += bool(add_photo_keyword(conn, ph, kid))
+    for ph, b in to_remove:
+        kid = have[ph][b][0]
+        done_rm += bool(remove_photo_keyword(conn, ph, kid))
+    db.set_setting(conn, BRANCH_SETTING, json.dumps(sorted(managed)))
+    conn.commit()
+    return {**result, "add": done_add, "remove": done_rm, "applied": True}
+
+
+def auto_branches(conn: sqlite3.Connection, photo_ids: Iterable[int]) -> None:
+    """After people were named on photos: keep their branch keywords current. Only once the
+    owner has written branch keywords by hand at least once (so nothing is written unreviewed)."""
+    ids = set(photo_ids)
+    if ids and db.get_setting(conn, BRANCH_SETTING) is not None:
+        sync_branch_keywords(conn, apply=True, photo_ids=ids)
 
 
 def assign(conn: sqlite3.Connection, face_ids: list[int], person_id: int) -> None:
@@ -142,7 +211,9 @@ def remove_from_cluster(conn: sqlite3.Connection, face_ids: list[int]) -> None:
 def merge_people(conn: sqlite3.Connection, src: int, dst: int) -> None:
     conn.execute("UPDATE faces SET person_id = ? WHERE person_id = ?", (dst, src))
     conn.execute("UPDATE keywords SET person_id = ? WHERE person_id = ?", (dst, src))
+    conn.execute("UPDATE OR IGNORE person_names SET person_id = ? WHERE person_id = ?", (dst, src))
     conn.execute("UPDATE OR IGNORE rejections SET person_id = ? WHERE person_id = ?", (dst, src))
+    family.move(conn, src, dst)
     conn.execute("DELETE FROM people WHERE id = ?", (src,))
     conn.commit()
 

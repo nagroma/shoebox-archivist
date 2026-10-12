@@ -23,7 +23,11 @@ export function KeywordInput({ exclude, onPick }: {
   const vocab = useVocabulary()
   const [text, setText] = useState('')
   const [newCategory, setNewCategory] = useState('')
-  const categories = useMemo(() => [...new Set(vocab.map(k => k.category))].sort(), [vocab])
+  const [facets, setFacets] = useState<string[]>([])
+  useEffect(() => { api.library().then(l => setFacets((l.facets ?? []).map(f => f.name))) }, [])
+  // Library facets even when empty, then every group already in use (incl. nested ones).
+  const categories = useMemo(
+    () => [...new Set([...facets, ...vocab.map(k => k.category)])].sort(), [facets, vocab])
   const match = vocab.find(k => keywordLabel(k) === text) ??
     vocab.find(k => k.name.toLowerCase() === text.replace(/\s/g, '').toLowerCase())
 
@@ -62,7 +66,7 @@ export function KeywordChip({ k, onRemove, extra }: {
     <span className={`kw ${k.kind} ${source}`}
       title={source === 'app' ? 'Added by Shoebox Archivist' : source === 'file' ? 'In the file when imported' : ''}>
       {k.person_id
-        ? <Link to={`/people/${k.person_id}`}>{displayName(k.name)}</Link>
+        ? <Link to={`/people/${k.person_id}`}>{('display' in k && k.display) || displayName(k.name)}</Link>
         : <Link to={`/photos?keyword=${k.id}`}>{k.name}</Link>}
       {extra}
       {onRemove && <button onClick={onRemove} title="Remove">×</button>}

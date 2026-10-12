@@ -1,21 +1,27 @@
-"""Keyword vocabulary and the (provisional) rules for what each category means.
+"""Keyword vocabulary and the rules for what each category means.
 
-These rules are best guesses from the collection's existing photos and Keywords.txt; they
-are expected to change once the keyword structure is refined. Keep them here,
-in one place, and see docs/KEYWORD_RULES.md.
+A library chooses its own top-level *facets* (People, Places, ...; see FACET_KINDS), stored
+in its database. Libraries created before facets existed fall back to LEGACY_CATEGORY_KIND.
+See docs/KEYWORD_RULES.md.
 """
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 from pathlib import Path
 
 from . import db
 
-# Category -> kind for the standard top-level groups. Any other bracketed group in
-# Keywords.txt ([Smith], [Parish], ...) is a family or community group of people.
-# A person can appear in more than one group (e.g. AnnBrown in People and [Parish]).
-CATEGORY_KIND = {
+# What a facet's keywords mean to the app. Only 'person' changes behaviour (a keyword
+# there is a person: linked to faces, named from CamelCase).
+FACET_KINDS = ("person", "event", "place", "subject", "attribute", "other")
+# Older libraries also have these two, from their Keywords.txt.
+KINDS = FACET_KINDS + ("family", "scouts")
+
+# Used only when a library has no facets configured (libraries from before facets existed).
+# Any other bracketed group in Keywords.txt ([Smith], [Parish], ...) is a group of people.
+LEGACY_CATEGORY_KIND = {
     "Attributes": "attribute",
     "Events": "event",
     "Families": "family",
@@ -25,25 +31,100 @@ CATEGORY_KIND = {
     "Subjects": "subject",
     "Other Keywords": "other",
 }
-KINDS = ("person", "family", "event", "place", "subject", "scouts", "attribute", "other")
+CATEGORY_KIND = LEGACY_CATEGORY_KIND
 
-# Category for people named in this app who have no keyword yet.
+# Category for people named in this app when the library has no person facet.
 DEFAULT_PERSON_CATEGORY = "People"
+FACETS_SETTING = "facets"
+OTHER_CATEGORY = "Other Keywords"
 
 # Attribute tags with meaning for the date (everything else is just a grouping tag).
 UNKNOWN_DATE = "unknowndate"
 CONFIRMED_DATE = "confirmeddate"
 
+_KIND_GUESS = {
+    "person": {"people", "person", "persons", "family", "names", "who"},
+    "place": {"places", "place", "locations", "location", "where"},
+    "event": {"events", "event", "occasions", "when"},
+    "subject": {"subjects", "subject", "things", "topics", "what"},
+    "attribute": {"attributes", "format", "curation", "rating", "ratings", "labels", "status"},
+}
+
+
+def guess_kind(facet_name: str) -> str:
+    """Best guess at what a top-level keyword found in files means, from its name."""
+    low = facet_name.strip("[] ").lower()
+    return next((k for k, names in _KIND_GUESS.items() if low in names), "other")
+
+
+def top_level(category: str) -> str:
+    return category.split("|", 1)[0].strip().strip("[]")
+
+
+def get_facets(conn: sqlite3.Connection) -> list[dict]:
+    """The library's top-level keyword groups: [{'name', 'kind'}]. Empty = not configured."""
+    try:
+        data = json.loads(db.get_setting(conn, FACETS_SETTING) or "[]")
+    except ValueError:
+        return []
+    return [f for f in data if isinstance(f, dict) and f.get("name")]
+
+
+def set_facets(conn: sqlite3.Connection, facets: list[dict]) -> list[dict]:
+    """Replace the facet list. Raises ValueError for bad names/kinds, or for removing a
+    facet that has keywords or changing a facet to/from 'person' once it has keywords."""
+    clean, seen = [], set()
+    for f in facets:
+        name, kind = str(f.get("name", "")).strip().strip("[]").strip(), f.get("kind", "other")
+        if not name or "|" in name:
+            raise ValueError("A facet needs a name without '|'")
+        if kind not in FACET_KINDS:
+            raise ValueError(f"Unknown kind {kind!r} for {name}")
+        if name.lower() in seen:
+            raise ValueError(f"Facet {name!r} is listed twice")
+        seen.add(name.lower())
+        clean.append({"name": name, "kind": kind})
+    old = {f["name"]: f["kind"] for f in get_facets(conn)}
+    new = {f["name"]: f["kind"] for f in clean}
+    for name in old.keys() - new.keys():
+        if _facet_keyword_count(conn, name):
+            raise ValueError(f"Facet {name!r} still has keywords; remove them first")
+    for name, kind in new.items():
+        if name in old and old[name] != kind:
+            if "person" in (old[name], kind) and _facet_keyword_count(conn, name):
+                raise ValueError(f"{name!r} has keywords, so it can't change to or from 'person'")
+            conn.execute("UPDATE keywords SET kind = ? WHERE category = ? OR category LIKE ?",
+                         (kind, name, name + "|%"))
+    db.set_setting(conn, FACETS_SETTING, json.dumps(clean))
+    conn.commit()
+    return clean
+
+
+def _facet_keyword_count(conn: sqlite3.Connection, name: str) -> int:
+    return conn.execute("SELECT COUNT(*) FROM keywords WHERE category = ? OR category LIKE ?",
+                        (name, name + "|%")).fetchone()[0]
+
+
+def default_person_category(conn: sqlite3.Connection) -> str:
+    return next((f["name"] for f in get_facets(conn) if f["kind"] == "person"),
+                DEFAULT_PERSON_CATEGORY)
+
 
 def kind_of(category: str, conn: sqlite3.Connection | None = None) -> str:
-    """Standard groups by name; otherwise whatever kind the group already has in the DB
-    (set from Keywords.txt), else 'other'."""
-    category = category.strip("[]")
-    if category in CATEGORY_KIND:
-        return CATEGORY_KIND[category]
+    """What a category means. Library facets first; a library without facets uses the
+    legacy standard groups; otherwise whatever kind the group already has in the DB
+    (set from Keywords.txt), else 'other'. Deeper paths use their top level."""
+    top = top_level(category)
+    facets = get_facets(conn) if conn is not None else []
+    if facets:
+        for f in facets:
+            if f["name"].lower() == top.lower():
+                return f["kind"]
+    elif top in LEGACY_CATEGORY_KIND:
+        return LEGACY_CATEGORY_KIND[top]
     if conn is not None:
-        row = conn.execute("SELECT kind FROM keywords WHERE category = ? "
-                           "ORDER BY in_vocab DESC LIMIT 1", (category,)).fetchone()
+        row = conn.execute("SELECT kind FROM keywords WHERE category = ? OR category LIKE ? "
+                           "ORDER BY in_vocab DESC LIMIT 1", (top, top + "|%")).fetchone()
         if row:
             return row["kind"]
     return "other"
@@ -62,33 +143,60 @@ def keyword_name(person_name: str) -> str:
 
 
 def parse_vocabulary(text: str) -> list[tuple[str, str]]:
-    """Parse a Lightroom keyword export (tab-indented; '[Group]' = container keyword)
-    into (category, name) pairs. Only two levels are used in practice."""
-    out, category = [], None
+    """Parse a Lightroom/Bridge keyword export (tab-indented; '[Group]' = container
+    keyword) into (category, name) pairs, where category is the parent path
+    ('Places|USA', 'Smith'). Top-level lines are categories, not keywords."""
+    out: list[tuple[str, str]] = []
+    stack: list[str] = []
     for line in text.splitlines():
         if not line.strip():
             continue
-        if not line[0].isspace():
-            category = line.strip().strip("[]")
-        elif category:
-            out.append((category, line.strip()))
+        depth = len(line) - len(line.lstrip("\t "))
+        name = line.strip().strip("[]").strip()
+        if not name:
+            continue
+        del stack[depth:]
+        if stack:
+            out.append(("|".join(stack), name))
+        stack.append(name)
     return out
+
+
+def export_vocabulary(conn: sqlite3.Connection) -> str:
+    """The library's keywords as a Keywords.txt (tab-indented), for import into Bridge or
+    Lightroom. Facets are listed even when empty."""
+    tree: dict = {}
+    for f in get_facets(conn):
+        tree.setdefault(f["name"], {})
+    for r in conn.execute("SELECT category, name FROM keywords ORDER BY category, name"):
+        node = tree
+        for part in [*r["category"].split("|"), r["name"]]:
+            node = node.setdefault(part.strip("[]"), {})
+    lines: list[str] = []
+
+    def walk(node: dict, depth: int) -> None:
+        for name in sorted(node, key=str.lower):
+            lines.append("\t" * depth + name)
+            walk(node[name], depth + 1)
+    walk(tree, 0)
+    return "\n".join(lines) + "\n"
 
 
 def person_groups(text: str) -> set[str]:
     """Bracketed top-level groups that aren't standard categories: families/communities."""
     return {line.strip().strip("[]") for line in text.splitlines()
             if line.strip().startswith("[") and not line[0].isspace()
-            and line.strip().strip("[]") not in CATEGORY_KIND}
+            and line.strip().strip("[]") not in LEGACY_CATEGORY_KIND}
 
 
 def split(keyword: str) -> tuple[str | None, str]:
-    """'Smith|JohnSmith' -> ('Smith', 'JohnSmith'). Deeper paths keep the top level
-    as category and the leaf as name."""
-    parts = [p.strip() for p in keyword.split("|") if p.strip()]
+    """'Smith|JohnSmith' -> ('Smith', 'JohnSmith'); 'Places|USA|Texas' -> ('Places|USA',
+    'Texas'). The category is the whole parent path, so the keyword can be written back
+    to the file unchanged."""
+    parts = [p.strip().strip("[]").strip() for p in keyword.split("|") if p.strip()]
     if len(parts) == 1:
         return None, parts[0]
-    return parts[0].strip("[]"), parts[-1]
+    return "|".join(parts[:-1]), parts[-1]
 
 
 # ---------------------------------------------------------------- DB helpers
@@ -125,7 +233,7 @@ def resolve(conn: sqlite3.Connection, keyword: str) -> int:
                            (name.replace(" ", "").lower(),)).fetchone()
         if row:
             return row["id"]
-        category = "Other Keywords"
+        category = OTHER_CATEGORY
     return ensure(conn, category, name)
 
 
@@ -154,7 +262,7 @@ def person_keyword(conn: sqlite3.Connection, person_id: int) -> int:
     name = conn.execute("SELECT name FROM people WHERE id = ?", (person_id,)).fetchone()["name"]
     return conn.execute(
         "INSERT INTO keywords(category, name, kind, person_id) VALUES (?, ?, 'person', ?)",
-        (DEFAULT_PERSON_CATEGORY, keyword_name(name), person_id)).lastrowid
+        (default_person_category(conn), keyword_name(name), person_id)).lastrowid
 
 
 def photo_people(conn: sqlite3.Connection, photo_id: int) -> set[int]:

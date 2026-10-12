@@ -51,7 +51,15 @@ export interface Cluster {
   faces: Face[]
 }
 
+export interface Alias { name: string; kind: string; from_year: number | null }
+
 export interface PersonSummary {
+  aliases: Alias[]
+  /** the name in use now (latest 'used from' year) */
+  display_name: string
+  name_from_year: number | null
+  /** relationship to the curator, e.g. 'Parent' */
+  relation: string | null
   id: number
   name: string
   birth_year: number | null
@@ -66,6 +74,10 @@ export interface PersonSummary {
 }
 
 export interface PersonDetail {
+  aliases: Alias[]
+  display_name: string
+  name_from_year: number | null
+  relation: string | null
   id: number
   name: string
   birth_year: number | null
@@ -75,6 +87,36 @@ export interface PersonDetail {
   keywords: { id: number; category: string; name: string; photos: number }[]
   confirmed: Face[]
   suggested: Face[]
+}
+
+export interface Relative { id: number; name: string; relation: string | null }
+export interface Relatives {
+  relation: string | null
+  curator: { id: number; name: string } | null
+  parents: Relative[]
+  partners: Relative[]
+  children: Relative[]
+  siblings: Relative[]
+}
+
+export interface TreeNode {
+  id: number; name: string; birth_year: number | null; death_year: number | null
+  cover: number | null; gen: number; relation: string | null
+}
+export interface Tree {
+  focus: number
+  nodes: TreeNode[]
+  edges: { a: number; b: number; kind: 'parent' | 'partner' }[]
+  curator: number | null
+}
+
+export interface BranchPlan {
+  category: string
+  branches: Record<string, number>
+  photos: number
+  add: number
+  remove: number
+  applied: boolean
 }
 
 export interface ParsedDate {
@@ -144,7 +186,11 @@ export interface BatchPhoto {
 }
 
 /** source: 'file' = already in the file (the owner's), 'app' = written by this app */
-export interface PhotoKeyword extends Keyword { source: 'file' | 'app' }
+export interface PhotoKeyword extends Keyword {
+  source: 'file' | 'app'
+  /** a person's name as of the photo's date */
+  display?: string | null
+}
 
 /** 'JohnSmith' -> 'John Smith' */
 export const displayName = (name: string) =>
@@ -171,6 +217,46 @@ export interface Stats {
   undated: number
 }
 
+export interface Facet { name: string; kind: string }
+export interface ProposedFacet extends Facet { found: number; from_files: boolean }
+export interface Preset { label: string; help: string; facets: Facet[] }
+
+export interface LibraryInfo {
+  open: boolean
+  presets: Record<string, Preset>
+  kinds: string[]
+  root?: string | null
+  data_dir?: string | null
+  /** data lives in <photo folder>/.shoebox, so the library can be reset */
+  managed?: boolean
+  facets?: (Facet & { keywords: number })[]
+  /** the person the library is organised around */
+  curator?: { id: number; name: string } | null
+}
+
+export interface FolderListing {
+  path: string
+  parent: string | null
+  dirs: { name: string; path: string }[]
+  images: number
+  has_library: boolean
+  home: string
+}
+
+export interface ScanState {
+  running: boolean
+  existing?: boolean
+  folder?: string
+  done?: number
+  total?: number
+  error?: string | null
+  facets?: ProposedFacet[]
+  result?: { folder: string; images: number; with_keywords: number; paths: Record<string, number>
+             n_paths: number; flat: Record<string, number>; n_flat: number } | null
+}
+
+export class NoLibraryError extends Error {}
+
 async function req<T>(method: string, url: string, body?: unknown): Promise<T> {
   const res = await fetch(url, {
     method,
@@ -183,6 +269,7 @@ async function req<T>(method: string, url: string, body?: unknown): Promise<T> {
       const j = await res.json()
       if (j.detail) msg = typeof j.detail === 'string' ? j.detail : JSON.stringify(j.detail)
     } catch { /* not json */ }
+    if (res.status === 409 && msg === 'no_library') throw new NoLibraryError(msg)
     throw new Error(msg)
   }
   return res.json() as Promise<T>
@@ -216,19 +303,33 @@ export const api = {
   createPerson: (name: string) => post<PersonDetail>('/api/people', { name }),
   updatePerson: (id: number, fields: Partial<PersonDetail>) =>
     req<PersonDetail>('PATCH', `/api/people/${id}`, fields),
+  saveAliases: (id: number, aliases: Alias[]) => req<Alias[]>('PUT', `/api/people/${id}/aliases`, aliases),
+  relatives: (id: number) => get<Relatives>(`/api/people/${id}/relatives`),
+  addRelative: (id: number, relation: 'parent' | 'child' | 'partner', who: PersonRef) =>
+    post<Relatives>(`/api/people/${id}/relatives`, { relation, ...who }),
+  removeRelative: (id: number, relation: 'parent' | 'child' | 'partner', other: number) =>
+    req<Relatives>('DELETE', `/api/people/${id}/relatives/${relation}/${other}`),
+  tree: (id: number, generations: number) => get<Tree>(`/api/family/${id}?generations=${generations}`),
+  branches: () => get<BranchPlan>('/api/family-branches'),
+  applyBranches: () => post<BranchPlan>('/api/family-branches'),
   mergePerson: (id: number, into: number) => post(`/api/people/${id}/merge`, { into }),
   deletePerson: (id: number) => req('DELETE', `/api/people/${id}`),
 
-  photos: (params: { filter?: string; person_id?: number; keyword_id?: number; q?: string }) => {
+  photos: (params: { filter?: string; person_id?: number; keyword_id?: number; q?: string;
+                    family_id?: number; generations?: number }) => {
     const qs = new URLSearchParams()
     if (params.filter) qs.set('filter', params.filter)
     if (params.person_id !== undefined) qs.set('person_id', String(params.person_id))
     if (params.keyword_id !== undefined) qs.set('keyword_id', String(params.keyword_id))
     if (params.q) qs.set('q', params.q)
+    if (params.family_id !== undefined) {
+      qs.set('family_id', String(params.family_id))
+      qs.set('generations', String(params.generations ?? 1))
+    }
     return get<PhotoSummary[]>(`/api/photos?${qs}`)
   },
   photo: (id: number) => get<PhotoDetail>(`/api/photos/${id}`),
-  fileMetadata: (id: number) => get<{ tags: Record<string, Record<string, unknown>>
+  fileMetadata: (id: number) => get<{ warning: string | null; tags: Record<string, Record<string, unknown>>
                                       app: Record<string, 'app' | 'changed' | 'managed'> }>(`/api/photos/${id}/file-metadata`),
   updatePhoto: (id: number, fields: Partial<Pick<PhotoDetail, 'date_text' | 'location' | 'caption' | 'back_text' | 'notes'>>) =>
     req<PhotoDetail>('PATCH', `/api/photos/${id}`, fields),
@@ -237,6 +338,7 @@ export const api = {
     post<PhotoKeyword[]>(`/api/photos/${photoId}/keywords`, kw),
   removeKeyword: (photoId: number, keywordId: number) =>
     req<PhotoKeyword[]>('DELETE', `/api/photos/${photoId}/keywords/${keywordId}`),
+  deleteKeyword: (id: number) => req('DELETE', `/api/keywords/${id}`),
   createKeyword: (kw: { category: string; name: string }) => post<Keyword>('/api/keywords', kw),
   batchGet: (photo_ids: number[]) => post<BatchPhoto[]>('/api/photos/batch-get', { photo_ids }),
   batchEdit: (body: { photo_ids: number[]; fields?: Partial<Record<'date_text' | 'location' | 'caption', string>>
@@ -251,6 +353,17 @@ export const api = {
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail ?? res.statusText)
     return res.json() as Promise<{ saved: number; skipped: string[]; folder: string }>
   },
+  library: () => get<LibraryInfo>('/api/library'),
+  listFolder: (path = '') => get<FolderListing>(`/api/fs/list?path=${encodeURIComponent(path)}`),
+  inspectFolder: (folder: string) => post<ScanState>('/api/library/inspect', { folder }),
+  inspectStatus: (preset: string) => get<ScanState>(`/api/library/inspect/status?preset=${preset}`),
+  createLibrary: (folder: string, facets: Facet[], import_keywords: boolean, curator = '') =>
+    post<LibraryInfo>('/api/library/create', { folder, facets, import_keywords, curator }),
+  setCurator: (name: string) => req<{ id: number; name: string } | null>('PUT', '/api/library/curator', { name }),
+  openLibrary: (folder: string) => post<LibraryInfo>('/api/library/open', { folder }),
+  closeLibrary: () => post<LibraryInfo>('/api/library/close'),
+  resetLibrary: (confirm: string) => post<LibraryInfo>('/api/library/reset', { confirm }),
+  saveFacets: (facets: Facet[]) => req<(Facet & { keywords: number })[]>('PUT', '/api/facets', facets),
   parseDate: (text: string) => get<{ text: string; date: ParsedDate | null }>(
     `/api/dates/parse?text=${encodeURIComponent(text)}`),
 }

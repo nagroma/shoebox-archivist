@@ -3,9 +3,10 @@ __pycache__/
 *.pyc
 .pytest_cache/
 data/
+.shoebox/
 node_modules/
 *.lrcat
-photos/
+photos-mt/
 photos-am/
 frontend/dist/
 *.lrdata/
@@ -28,3 +29,6 @@ frontend/dist/
 
 # Library vocabulary: real names, never commit
 Keywords.txt
+
+# Keyword restructuring proposal: contains real family names, delete once adopted
+docs/KEYWORD_STRATEGY.md

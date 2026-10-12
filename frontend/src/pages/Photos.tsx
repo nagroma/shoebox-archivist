@@ -20,6 +20,8 @@ export function PhotosPage() {
   const [params, setParams] = useSearchParams()
   const filter = params.get('filter') ?? 'all'
   const personId = params.get('person') ? Number(params.get('person')) : undefined
+  const familyId = params.get('family') ? Number(params.get('family')) : undefined
+  const generations = Number(params.get('generations') ?? 1) || 1
   const keywordId = params.get('keyword') ? Number(params.get('keyword')) : undefined
   const [keywordName, setKeywordName] = useState<string | null>(null)
   useEffect(() => {
@@ -40,7 +42,7 @@ export function PhotosPage() {
 
   useEffect(() => {
     const t = setTimeout(() => {
-      api.photos({ filter, person_id: personId, keyword_id: keywordId, q: params.get('q') ?? undefined }).then(p => {
+      api.photos({ filter, person_id: personId, keyword_id: keywordId, family_id: familyId, generations, q: params.get('q') ?? undefined }).then(p => {
         setPhotos(p)
         photoSequence = p.map(x => x.id)
         const shown = new Set(photoSequence)
@@ -48,11 +50,12 @@ export function PhotosPage() {
       })
     }, 0)
     return () => clearTimeout(t)
-  }, [filter, personId, keywordId, params, version])
+  }, [filter, personId, keywordId, familyId, generations, params, version])
 
-  function set(key: string, value: string | null) {
+  function set(key: string, value: string | null, ...alsoClear: string[]) {
     const next = new URLSearchParams(params)
     if (value) next.set(key, value); else next.delete(key)
+    alsoClear.forEach(k => next.delete(k))
     setParams(next, { replace: true })
   }
 
@@ -81,6 +84,7 @@ export function PhotosPage() {
   }
 
   const person = people.find(p => p.id === personId)
+  const familyOf = people.find(p => p.id === familyId)
 
   return (
     <div className="page">
@@ -103,9 +107,10 @@ export function PhotosPage() {
             onBlur={() => set('q', q || null)} />
         </div>
       </header>
-      {(person || keywordName) && (
+      {(person || keywordName || familyOf) && (
         <p className="chip-row">
           {person && <span className="chip">With {person.name} <button onClick={() => set('person', null)}>×</button></span>}
+          {familyOf && <span className="chip">Family of {familyOf.display_name}{generations > 1 && ` (${generations} generations)`} <button onClick={() => set('family', null, 'generations')}>×</button></span>}
           {keywordName && <span className="chip">Keyword {keywordName} <button onClick={() => set('keyword', null)}>×</button></span>}
         </p>
       )}

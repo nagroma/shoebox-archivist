@@ -13,12 +13,14 @@ interface Props {
   excludeId?: number
   allowNew?: boolean
   autoFocus?: boolean
+  /** Empty the box after a pick (for adding several people in a row). */
+  clearOnPick?: boolean
 }
 
 /** Type-ahead person chooser. Enter picks the highlighted match, or creates a new person. */
 export function PersonPicker({
   onPick, placeholder = 'Name…', initial = '', buttonLabel = 'Assign',
-  disabled, excludeId, allowNew = true, autoFocus,
+  disabled, excludeId, allowNew = true, autoFocus, clearOnPick,
 }: Props) {
   const { people, resolvePerson } = useApp()
   const [text, setText] = useState(initial)
@@ -32,7 +34,8 @@ export function PersonPicker({
     const t = text.trim().toLowerCase()
     return people
       .filter(p => p.id !== excludeId)
-      .filter(p => !t || p.name.toLowerCase().includes(t))
+      .filter(p => !t || p.name.toLowerCase().includes(t) ||
+        p.aliases?.some(a => a.name.toLowerCase().includes(t)))
       .sort((a, b) => {
         const as = a.name.toLowerCase().startsWith(t) ? 0 : 1
         const bs = b.name.toLowerCase().startsWith(t) ? 0 : 1
@@ -41,10 +44,15 @@ export function PersonPicker({
       .slice(0, 8)
   }, [people, text, excludeId])
 
-  const exact = people.some(p => p.name.toLowerCase() === text.trim().toLowerCase())
+  const low = text.trim().toLowerCase()
+  const exact = people.some(p => p.name.toLowerCase() === low ||
+    p.aliases?.some(a => a.name.toLowerCase() === low))
   const showNew = allowNew && text.trim() !== '' && !exact
   const options: { label: string; who: PersonRef }[] = [
-    ...matches.map(p => ({ label: p.name, who: { person_id: p.id } as PersonRef })),
+    ...matches.map(p => ({
+      label: p.aliases?.length ? `${p.display_name} (${[p.name, ...p.aliases.map(a => a.name)].filter(n => n !== p.display_name).join(', ')})` : p.name,
+      who: { person_id: p.id } as PersonRef,
+    })),
     ...(showNew ? [{ label: `+ New person "${text.trim()}"`, who: { name: text.trim() } as PersonRef }] : []),
   ]
 
@@ -52,11 +60,15 @@ export function PersonPicker({
     const o = options[i]
     if (!o) {
       const who = resolvePerson(text)
-      if (who && (allowNew || 'person_id' in who)) onPick(who, text.trim())
+      if (who && (allowNew || 'person_id' in who)) {
+        onPick(who, text.trim())
+        if (clearOnPick) { setText(''); setHi(0) }
+      }
       return
     }
     onPick(o.who, 'name' in o.who ? o.who.name : o.label)
     setOpen(false)
+    if (clearOnPick) { setText(''); setHi(0) }
   }
 
   useEffect(() => {

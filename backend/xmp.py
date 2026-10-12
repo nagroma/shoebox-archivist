@@ -112,6 +112,27 @@ def read_all(path: Path) -> dict[str, dict]:
         return {"exif": im.read_exif(), "iptc": im.read_iptc(), "xmp": im.read_xmp()}
 
 
+def read_all_safe(path: Path) -> tuple[dict[str, dict], str | None]:
+    """read_all, but a file exiv2 can't open (e.g. a damaged maker-note preview) still shows
+    the EXIF that Pillow can read. Returns (tags, warning)."""
+    try:
+        return read_all(path), None
+    except Exception as e:
+        warning = (f"This file's metadata block is damaged ({str(e).splitlines()[0]}). "
+                   "The app can't read its keywords or write to it; the image itself is fine.")
+    exif: dict = {}
+    try:
+        from PIL import ExifTags, Image
+        with Image.open(path) as im:
+            for tag, val in im.getexif().items():
+                if isinstance(val, bytes):
+                    continue
+                exif[f"Exif.Image.{ExifTags.TAGS.get(tag, hex(tag))}"] = str(val)
+    except Exception:
+        pass
+    return {"exif": exif, "iptc": {}, "xmp": {}}, warning
+
+
 def _full_date(d: str) -> str:
     """'1975' / '1975-05' / '1975-05-01T..' -> '1975-01-01' etc. (IPTC/EXIF need a full date)."""
     parts = d[:10].split("-") + ["01", "01"]

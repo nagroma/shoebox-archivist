@@ -22,6 +22,29 @@ CREATE TABLE IF NOT EXISTS people (
     notes      TEXT
 );
 
+-- Other names a person is known by (married name, nickname). The keyword written to
+-- files stays under people.name; an alias with from_year is shown for photos dated
+-- from that year on.
+CREATE TABLE IF NOT EXISTS person_names (
+    id        INTEGER PRIMARY KEY,
+    person_id INTEGER NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+    name      TEXT NOT NULL,
+    kind      TEXT NOT NULL DEFAULT 'other',   -- birth|married|nickname|other
+    from_year INTEGER,
+    UNIQUE (person_id, name)
+);
+
+-- Family links. kind 'parent': a is a parent of b. kind 'partner': a and b are partners
+-- (stored with a < b). Everything else (siblings, grandparents, cousins, labels) is derived
+-- from these - see family.py.
+CREATE TABLE IF NOT EXISTS relations (
+    a    INTEGER NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+    b    INTEGER NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    PRIMARY KEY (a, b, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_relations_b ON relations(b);
+
 -- A logical photograph. Has one or more images (front, back, ...).
 CREATE TABLE IF NOT EXISTS photos (
     id         INTEGER PRIMARY KEY,
@@ -123,6 +146,13 @@ def connect(db_path: Path) -> sqlite3.Connection:
         import uuid
         set_setting(conn, "db_token", uuid.uuid4().hex[:12])
         conn.commit()
+    if db_path.parent.name == ".shoebox":
+        # A library keeps its data beside its photos, so it survives the folder being moved
+        # or renamed: the stored root follows the folder the database is actually in.
+        here = str(db_path.parent.parent.resolve())
+        if get_setting(conn, "library_root") not in (None, here):
+            set_setting(conn, "library_root", here)
+            conn.commit()
     return conn
 
 
@@ -134,6 +164,7 @@ MIGRATIONS = [
     ("photos", "location", "TEXT"),
     ("photos", "notes", "TEXT"),
     ("people", "cover_face_id", "INTEGER"),
+    ("people", "name_from_year", "INTEGER"),   # year the main name came into use (else always)
     ("photos", "date_source", "TEXT"),       # xmp | exif | user | back_ocr
     ("photos", "taken_at", "TEXT"),          # full EXIF timestamp, when known
     ("photos", "gps_lat", "REAL"),
@@ -181,4 +212,8 @@ def get_or_create_person(conn: sqlite3.Connection, name: str) -> int:
     row = conn.execute("SELECT id FROM people WHERE name = ?", (name,)).fetchone()
     if row:
         return row["id"]
+    alias = conn.execute("SELECT person_id FROM person_names WHERE lower(name) = lower(?)",
+                         (name,)).fetchone()
+    if alias:  # typing a married name finds the person, it doesn't create a new one
+        return alias["person_id"]
     return conn.execute("INSERT INTO people(name) VALUES(?)", (name,)).lastrowid
