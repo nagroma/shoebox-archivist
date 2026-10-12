@@ -60,7 +60,7 @@ export function FileMetadata({ photoId }: { photoId: number }) {
           byNs.set(ns, [...(byNs.get(ns) ?? []), [k, v]])
         }
         return (
-          <details key={group} open>
+          <details key={group} open={group.toLowerCase() === 'xmp'}>
             <summary>{group.toUpperCase()} <span className="muted">({Object.keys(tags).length})</span></summary>
             <table className="meta-table">
               {[...byNs.entries()].map(([ns, rows]) => (
