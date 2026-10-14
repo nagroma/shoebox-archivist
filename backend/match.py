@@ -72,10 +72,12 @@ def _impossible_people(conn: sqlite3.Connection) -> dict[int, set[int]]:
     return out
 
 
-def label_from_keywords(conn: sqlite3.Connection) -> int:
+def label_from_keywords(conn: sqlite3.Connection, confirm: bool = True) -> int:
     """A photo keyworded with exactly one person that shows exactly one face: that
     face is the person. The name was already confirmed by whoever keyworded the
-    photo; we only infer which face it belongs to. Rejections are respected."""
+    photo; we only infer which face it belongs to. Rejections are respected.
+    With confirm=False the face is only *suggested* (source 'keyword'), for a person to
+    confirm in bulk."""
     rows = conn.execute("""
         SELECT i.photo_id, MIN(f.id) AS face_id, COUNT(*) AS n,
                MAX(f.status = 'confirmed') AS has_confirmed
@@ -91,8 +93,9 @@ def label_from_keywords(conn: sqlite3.Connection) -> int:
         if conn.execute("SELECT 1 FROM rejections WHERE face_id = ? AND person_id = ?",
                         (r["face_id"], pid)).fetchone():
             continue
-        conn.execute("UPDATE faces SET person_id = ?, status = 'confirmed', confidence = NULL, "
-                     "label_source = 'keyword' WHERE id = ?", (pid, r["face_id"]))
+        conn.execute("UPDATE faces SET person_id = ?, status = ?, confidence = NULL, "
+                     "label_source = 'keyword' WHERE id = ?",
+                     (pid, "confirmed" if confirm else "suggested", r["face_id"]))
         n += 1
     conn.commit()
     return n
@@ -114,8 +117,7 @@ def suggest(conn: sqlite3.Connection, threshold: float | None = None) -> int:
     cfg = config.load(conn)
     if threshold is None:
         threshold = cfg["suggest_threshold"]
-    if cfg["keyword_autoconfirm"]:
-        label_from_keywords(conn)
+    label_from_keywords(conn, confirm=cfg["keyword_autoconfirm"])
     gallery = Gallery.load(conn)
     rejected: dict[int, set[int]] = defaultdict(set)
     for r in conn.execute("SELECT face_id, person_id FROM rejections"):

@@ -36,7 +36,10 @@ export interface Settings {
   suggest_threshold: number
   keyword_autoconfirm: boolean
   min_cluster_size: number
+  cluster_merge_threshold: number
+  neighbour_threshold: number
   preselect_non_faces: boolean
+  show_enhanced: boolean
 }
 
 export interface SettingsData {
@@ -44,6 +47,11 @@ export interface SettingsData {
   defaults: Settings
   help: Record<keyof Settings, string>
   info: { library_root: string | null; data_dir: string; provider: string }
+}
+
+export interface MatchFace extends Face { similarity: number | null; seed: boolean }
+export interface MatchGroup {
+  person_id: number; name: string; confirmed: number; guess: boolean; faces: MatchFace[]
 }
 
 export interface Cluster {
@@ -58,7 +66,7 @@ export interface PersonSummary {
   /** the name in use now (latest 'used from' year) */
   display_name: string
   name_from_year: number | null
-  /** relationship to the curator, e.g. 'Parent' */
+  /** relationship to the curator, e.g. 'Mother/Father' */
   relation: string | null
   id: number
   name: string
@@ -89,12 +97,13 @@ export interface PersonDetail {
   suggested: Face[]
 }
 
-export interface Relative { id: number; name: string; relation: string | null }
+export interface Relative { id: number; name: string; relation: string | null; end_year?: number | null }
 export interface Relatives {
   relation: string | null
   curator: { id: number; name: string } | null
   parents: Relative[]
   partners: Relative[]
+  former_partners: Relative[]
   children: Relative[]
   siblings: Relative[]
 }
@@ -106,7 +115,7 @@ export interface TreeNode {
 export interface Tree {
   focus: number
   nodes: TreeNode[]
-  edges: { a: number; b: number; kind: 'parent' | 'partner' }[]
+  edges: { a: number; b: number; kind: 'parent' | 'partner'; ended: boolean }[]
   curator: number | null
 }
 
@@ -117,6 +126,22 @@ export interface BranchPlan {
   add: number
   remove: number
   applied: boolean
+}
+
+export interface RegroupPlan {
+  people_category: string
+  family_category: string
+  photos: number
+  keywords: number
+  applied: boolean
+  converted?: number
+  failed?: number
+  groups: {
+    group: string
+    family_keyword: string
+    skipped_deeper: number
+    people: { name: string; display: string; photos: number; to: string; merges_existing: boolean }[]
+  }[]
 }
 
 export interface ParsedDate {
@@ -141,6 +166,7 @@ export interface PhotoSummary {
 export interface ImageInfo {
   id: number
   role: 'front' | 'back' | 'other'
+  variant: 'enhanced' | null
   path: string
   width: number | null
   height: number | null
@@ -164,6 +190,7 @@ export interface PhotoDetail {
   images: ImageInfo[]
   faces: Face[]
   keywords: PhotoKeyword[]
+  show_enhanced: boolean
 }
 
 export interface Keyword {
@@ -218,7 +245,14 @@ export interface Stats {
 }
 
 export interface Facet { name: string; kind: string }
-export interface ProposedFacet extends Facet { found: number; from_files: boolean }
+export interface ProposedFacet extends Facet {
+  found: number; from_files: boolean
+  samples?: string[]; keywords?: number; looks_like_people?: boolean
+}
+export interface UnmappedGroup {
+  name: string; kind: string; photos: number; keywords: number
+  samples: string[]; looks_like_people: boolean
+}
 export interface Preset { label: string; help: string; facets: Facet[] }
 
 export interface LibraryInfo {
@@ -251,6 +285,7 @@ export interface ScanState {
   total?: number
   error?: string | null
   facets?: ProposedFacet[]
+  preset?: string
   result?: { folder: string; images: number; with_keywords: number; paths: Record<string, number>
              n_paths: number; flat: Record<string, number>; n_flat: number } | null
 }
@@ -284,6 +319,8 @@ export type PersonRef = { person_id: number } | { name: string }
 export const api = {
   stats: () => get<Stats>('/api/stats'),
   clusters: () => get<Cluster[]>('/api/clusters'),
+  matches: () => get<MatchGroup[]>('/api/matches'),
+  notPerson: (face_ids: number[], person_id: number) => post('/api/faces/not-person', { face_ids, person_id }),
   recluster: (min_size?: number) => post<{ clusters: number; suggestions: number }>('/api/recluster', { min_size }),
 
   assign: (face_ids: number[], who: PersonRef) =>
@@ -309,7 +346,15 @@ export const api = {
     post<Relatives>(`/api/people/${id}/relatives`, { relation, ...who }),
   removeRelative: (id: number, relation: 'parent' | 'child' | 'partner', other: number) =>
     req<Relatives>('DELETE', `/api/people/${id}/relatives/${relation}/${other}`),
+  setPartnership: (id: number, other: number, ended: boolean, end_year: number | null) =>
+    req<Relatives>('PUT', `/api/people/${id}/partners/${other}`, { ended, end_year }),
   tree: (id: number, generations: number) => get<Tree>(`/api/family/${id}?generations=${generations}`),
+  unmappedGroups: () => get<UnmappedGroup[]>('/api/groups/unmapped'),
+  resolveGroup: (name: string, action: 'facet' | 'leave', kind = 'other') =>
+    post<UnmappedGroup[]>('/api/groups/resolve', { name, action, kind }),
+  regroupGroups: () => get<{ name: string; kind: string; keywords: number }[]>('/api/regroup/groups'),
+  regroupPlan: (groups: string[]) => post<RegroupPlan>('/api/regroup/plan', { groups }),
+  regroupApply: (groups: string[]) => post<RegroupPlan>('/api/regroup/apply', { groups, confirm: true }),
   branches: () => get<BranchPlan>('/api/family-branches'),
   applyBranches: () => post<BranchPlan>('/api/family-branches'),
   mergePerson: (id: number, into: number) => post(`/api/people/${id}/merge`, { into }),

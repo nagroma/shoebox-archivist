@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { api, type Facet, type Keyword, type FolderListing, type LibraryInfo, type ProposedFacet, type ScanState } from '../api'
+import { api, type Facet, type Keyword, type FolderListing, type LibraryInfo, type ProposedFacet, type RegroupPlan, type ScanState, type UnmappedGroup } from '../api'
 
 const KIND_HELP: Record<string, string> = {
   person: 'people (linked to faces)', event: 'events', place: 'places', subject: 'subjects',
@@ -58,7 +58,7 @@ function FolderPicker({ onPick }: { onPick: (folder: string) => void }) {
 function NewLibrary({ info }: { info: LibraryInfo }) {
   const [folder, setFolder] = useState<string | null>(null)
   const [scan, setScan] = useState<ScanState | null>(null)
-  const [preset, setPreset] = useState('family')
+  const [preset, setPreset] = useState('auto')
   const [facets, setFacets] = useState<ProposedFacet[] | null>(null)
   const [useKeywords, setUseKeywords] = useState(true)
   const [curator, setCurator] = useState('')
@@ -70,12 +70,13 @@ function NewLibrary({ info }: { info: LibraryInfo }) {
     const s = await api.inspectStatus(p)
     setScan(s)
     if (s.running) { timer.current = window.setTimeout(() => poll(p), 600); return }
+    if (s.preset) setPreset(s.preset)
     if (s.facets) setFacets(s.facets)
   }, [])
   useEffect(() => () => window.clearTimeout(timer.current), [])
 
   async function choose(path: string) {
-    setError(''); setScan(null); setFacets(null); setFolder(path)
+    setError(''); setScan(null); setFacets(null); setFolder(path); setPreset('auto')
     try {
       const s = await api.inspectFolder(path)
       setScan(s)
@@ -154,7 +155,7 @@ function NewLibrary({ info }: { info: LibraryInfo }) {
 
               <div className="field-block">
                 <label className="muted small" htmlFor="curator">Who is curating this library? (your full name)</label>
-                <input id="curator" value={curator} placeholder="e.g. Jane Morgan" style={{ width: '100%', maxWidth: 360 }}
+                <input id="curator" value={curator} placeholder="e.g. Jane Quill" style={{ width: '100%', maxWidth: 360 }}
                   onChange={e => setCurator(e.target.value)} />
                 <p className="muted small">
                   The family is organised around you: generations, sides of the family and relationships
@@ -176,7 +177,7 @@ function NewLibrary({ info }: { info: LibraryInfo }) {
               </div>
 
               <table className="facets">
-                <thead><tr><th>Top-level keyword group (facet)</th><th>Kind</th><th>In photos</th><th /></tr></thead>
+                <thead><tr><th>Top-level keyword group (facet)</th><th>Kind</th><th>Examples</th><th>In photos</th><th /></tr></thead>
                 <tbody>
                   {facets.map((f, i) => (
                     <tr key={i}>
@@ -185,6 +186,14 @@ function NewLibrary({ info }: { info: LibraryInfo }) {
                         <select value={f.kind} onChange={e => setFacet(i, { kind: e.target.value })}>
                           {info.kinds.map(k => <option key={k} value={k}>{k} – {KIND_HELP[k] ?? ''}</option>)}
                         </select>
+                      </td>
+                      <td className="muted small">
+                        {f.samples?.join(', ')}
+                        {f.looks_like_people && f.kind !== 'person' && (
+                          <div>Looks like names of people.{' '}
+                            <button className="ghost" onClick={() => setFacet(i, { kind: 'person' })}>Use as people</button>
+                          </div>
+                        )}
                       </td>
                       <td className="muted">{f.found || ''}{f.from_files && ' (from files)'}</td>
                       <td><button className="ghost" title="Remove"
@@ -236,6 +245,129 @@ function NewLibrary({ info }: { info: LibraryInfo }) {
 
 /** Facets, Keywords.txt export and reset for the open library. */
 /** Keywords on no photo: mistakes, or vocabulary entries nobody used. */
+/** Family-name groups (Ashdown|JuliaAshdown) -> People|JuliaAshdown + Family|Ashdown. Preview, then one click. */
+function FamilyGroups({ reload }: { reload: () => void }) {
+  const [groups, setGroups] = useState<{ name: string; kind: string; keywords: number }[]>([])
+  const [picked, setPicked] = useState<string[]>([])
+  const [plan, setPlan] = useState<RegroupPlan | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState('')
+  const [error, setError] = useState('')
+
+  const load = useCallback(() => { api.regroupGroups().then(setGroups).catch(() => setGroups([])) }, [])
+  useEffect(load, [load])
+  if (!groups.length && !msg) return null
+
+  async function preview(next: string[]) {
+    setPicked(next); setPlan(null); setError(''); setMsg('')
+    if (!next.length) return
+    try { setPlan(await api.regroupPlan(next)) } catch (e) { setError((e as Error).message) }
+  }
+
+  async function apply() {
+    setBusy(true); setError('')
+    try {
+      const r = await api.regroupApply(picked)
+      setMsg(`Converted ${r.converted} keywords on ${r.photos} photos` + (r.failed ? ` (${r.failed} failed)` : '') +
+        '. `pm strip` undoes it.')
+      setPlan(null); setPicked([]); load(); reload()
+    } catch (e) { setError((e as Error).message) } finally { setBusy(false) }
+  }
+
+  return (
+    <section className="card">
+      <h2>Family-name groups</h2>
+      <p className="muted small">
+        Groups like <code>Ashdown|JuliaAshdown</code> name people under a family. Tick the groups that are family names;
+        each keyword becomes <code>People|JuliaAshdown</code> plus <code>Family|Ashdown</code> in the photo files.
+        Nothing changes until you confirm the preview, and <code>pm strip</code> puts the old keywords back.
+      </p>
+      <div className="row">
+        {groups.map(g => (
+          <label key={g.name} className="row small">
+            <input type="checkbox" checked={picked.includes(g.name)}
+              onChange={e => preview(e.target.checked ? [...picked, g.name] : picked.filter(x => x !== g.name))} />
+            {g.name} <span className="muted">({g.keywords})</span>
+          </label>
+        ))}
+      </div>
+      {plan && (
+        <>
+          {plan.groups.map(g => (
+            <details key={g.group} open={plan.groups.length === 1}>
+              <summary>{g.group} &rarr; {plan.people_category}|&lt;name&gt; + {g.family_keyword}
+                {' '}<span className="muted">({g.people.length} people)</span></summary>
+              <table className="facets"><tbody>
+                {g.people.map(p => (
+                  <tr key={p.name}><td>{p.display}</td><td className="muted">{p.photos} photos</td>
+                    <td className="muted">{p.merges_existing ? `joins existing ${p.to}` : p.to}</td></tr>
+                ))}
+              </tbody></table>
+              {g.skipped_deeper > 0 && <p className="muted small">{g.skipped_deeper} deeper keywords are left alone.</p>}
+            </details>
+          ))}
+          <div className="row">
+            <span className="grow muted small">{plan.keywords} keywords on {plan.photos} photos will change.</span>
+            <button className="primary" disabled={busy} onClick={apply}>
+              {busy ? 'Converting…' : `Convert ${plan.photos} photos`}
+            </button>
+          </div>
+        </>
+      )}
+      {msg && <p className="hint">{msg}</p>}
+      {error && <p className="hint error">{error}</p>}
+    </section>
+  )
+}
+
+/** Keyword groups that arrived with later photos and match no facet: add as a facet, or leave. */
+function NewGroups({ reload, kinds }: { reload: () => void; kinds: string[] }) {
+  const [groups, setGroups] = useState<UnmappedGroup[]>([])
+  const [kind, setKind] = useState<Record<string, string>>({})
+  const [error, setError] = useState('')
+  useEffect(() => { api.unmappedGroups().then(setGroups).catch(() => setGroups([])) }, [])
+  if (!groups.length) return null
+
+  async function resolve(g: UnmappedGroup, action: 'facet' | 'leave') {
+    setError('')
+    try {
+      setGroups(await api.resolveGroup(g.name, action, kind[g.name] ?? (g.looks_like_people ? 'person' : g.kind)))
+      if (action === 'facet') reload()
+    } catch (e) { setError((e as Error).message) }
+  }
+
+  return (
+    <section className="card">
+      <h2>New keyword groups</h2>
+      <p className="muted small">
+        These groups came in with newly added photos and are not facets yet. Adding one only tells the app what
+        it is; the keywords in your files are not changed. Leaving one alone hides it here.
+      </p>
+      <table className="facets">
+        <tbody>
+          {groups.map(g => (
+            <tr key={g.name}>
+              <td><strong>{g.name}</strong> <span className="muted small">({g.keywords} keywords, {g.photos} photos)</span>
+                <div className="muted small">{g.samples.join(', ')}</div></td>
+              <td>
+                <select value={kind[g.name] ?? (g.looks_like_people ? 'person' : g.kind)}
+                  onChange={e => setKind({ ...kind, [g.name]: e.target.value })}>
+                  {kinds.map(k => <option key={k} value={k}>{k}</option>)}
+                </select>
+              </td>
+              <td className="row">
+                <button className="primary" onClick={() => resolve(g, 'facet')}>Add as facet</button>
+                <button className="ghost" onClick={() => resolve(g, 'leave')}>Leave</button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {error && <p className="hint error">{error}</p>}
+    </section>
+  )
+}
+
 function UnusedKeywords() {
   const [list, setList] = useState<Keyword[] | null>(null)
   const [error, setError] = useState('')
@@ -346,6 +478,9 @@ function CurrentLibrary({ info, reload }: { info: LibraryInfo; reload: () => voi
         {msg && <p className="hint">{msg}</p>}
         {error && <p className="hint error">{error}</p>}
       </section>
+
+      <NewGroups reload={reload} kinds={info.kinds} />
+      <FamilyGroups reload={reload} />
 
       <UnusedKeywords />
 

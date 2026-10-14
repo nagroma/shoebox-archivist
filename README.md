@@ -10,7 +10,7 @@ A local-first manager for **historic family photo collections**. It does three t
 
 ## Features
 - **Face recognition** (InsightFace / ArcFace via ONNX Runtime). It uses your NVIDIA GPU on Windows and CoreML/CPU on macOS.
-  - Photos already keyworded with people's names seed recognition automatically.
+  - Photos already keyworded with people's names seed recognition: the keyword suggests the name, and you confirm.
   - New faces are *suggested*, never silently assigned.
 - **Thorough face detection** (default): extra contrast-enhanced, enlarged and rotated passes catch tilted, small and faded faces. Detections that might not be faces go to a *Possible faces* list for a quick yes/no. The list learns from those answers: it sorts and pre-selects likely non-faces, but never hides anything on its own.
 - **Keyword-aware matching.** In a photo tagged "Jane Doe, John Doe", the two faces are matched only against those two people.

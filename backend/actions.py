@@ -32,6 +32,15 @@ def _front_path(conn: sqlite3.Connection, photo_id: int):
     return db.library_root(conn) / row["path"] if row else None
 
 
+def _front_paths(conn: sqlite3.Connection, photo_id: int) -> list:
+    """Every file that shows this photo's front: the original, then enhanced copies (FastFoto
+    '_a'). Metadata edits go to all of them so the copies never disagree."""
+    root = db.library_root(conn)
+    return [root / r["path"] for r in conn.execute(
+        "SELECT path FROM images WHERE photo_id = ? AND (role = 'front' OR variant = 'enhanced') "
+        "ORDER BY role = 'front' DESC, id", (photo_id,))]
+
+
 def add_photo_keyword(conn: sqlite3.Connection, photo_id: int, keyword_id: int) -> bool:
     """Put a keyword on a photo: in the DB and in the file. False if already there."""
     if conn.execute("SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
@@ -39,8 +48,8 @@ def add_photo_keyword(conn: sqlite3.Connection, photo_id: int, keyword_id: int) 
         return False
     path = _front_path(conn, photo_id)
     try:
-        if path:
-            xmp.add_keywords(path, [keywords.path_of(conn, keyword_id)])
+        for p in _front_paths(conn, photo_id):
+            xmp.add_keywords(p, [keywords.path_of(conn, keyword_id)])
     except Exception as e:  # read-only / locked file: leave DB unchanged
         print(f"  could not write keyword to {path}: {e}", file=sys.stderr)
         return False
@@ -58,8 +67,8 @@ def remove_photo_keyword(conn: sqlite3.Connection, photo_id: int, keyword_id: in
         return False
     path = _front_path(conn, photo_id)
     try:
-        if path:
-            xmp.remove_keywords(path, [keywords.path_of(conn, keyword_id)], only_app_added=only_app)
+        for p in _front_paths(conn, photo_id):
+            xmp.remove_keywords(p, [keywords.path_of(conn, keyword_id)], only_app_added=only_app)
     except Exception as e:
         print(f"  could not update keywords in {path}: {e}", file=sys.stderr)
         return False
@@ -97,7 +106,7 @@ def sync_branch_keywords(conn: sqlite3.Connection, apply: bool = False,
     to those photos."""
     import json
     branch_of = family.branches(conn)
-    cat = next((f["name"] for f in keywords.get_facets(conn) if f["name"].lower() == "family"), "Family")
+    cat = keywords.family_category(conn)
 
     per_photo: dict[int, set[int]] = {}
     for r in conn.execute("SELECT i.photo_id, f.person_id FROM faces f JOIN images i ON i.id = f.image_id "
@@ -179,6 +188,19 @@ def reject(conn: sqlite3.Connection, face_ids: list[int]) -> int:
     conn.commit()
     _sync_keywords(conn, before)
     return len(rows)
+
+
+def reject_person(conn: sqlite3.Connection, face_ids: list[int], person_id: int) -> int:
+    """These faces are not this person (from a likely-matches list): remember it so they are
+    not offered for that person again. A face currently suggested as them goes back to unknown."""
+    if not face_ids:
+        return 0
+    ids = [r["id"] for r in conn.execute(
+        f"SELECT id FROM faces WHERE status != 'confirmed' AND id IN ({_ids_sql(face_ids)})", face_ids)]
+    conn.executemany("INSERT OR IGNORE INTO rejections(face_id, person_id) VALUES (?, ?)",
+                     [(i, person_id) for i in ids])
+    conn.commit()
+    return len(ids)
 
 
 def ignore(conn: sqlite3.Connection, face_ids: list[int]) -> None:
@@ -266,9 +288,9 @@ def update_photo(conn: sqlite3.Connection, photo_id: int, fields: dict) -> None:
     if fields:
         sets = ", ".join(f"{k} = ?" for k in fields)
         conn.execute(f"UPDATE photos SET {sets} WHERE id = ?", (*fields.values(), photo_id))
-    path = _front_path(conn, photo_id)
-    if to_file and path:
-        xmp.write_fields(path, **to_file)
+    if to_file:
+        for p in _front_paths(conn, photo_id):
+            xmp.write_fields(p, **to_file)
     conn.commit()
 
 

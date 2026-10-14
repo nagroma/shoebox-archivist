@@ -34,10 +34,11 @@ def test_bad_values_are_rejected_and_nothing_is_saved(conn, changes):
 
 def test_threshold_comes_from_settings(conn, monkeypatch):
     seen = []
-    monkeypatch.setattr(match, "label_from_keywords", lambda c: seen.append("auto"))
+    monkeypatch.setattr(match, "label_from_keywords",
+                        lambda c, confirm=True: seen.append(confirm))
     config.save(conn, {"suggest_threshold": 0.5, "keyword_autoconfirm": False})
     match.suggest(conn)
-    assert seen == []  # auto-confirm switched off
+    assert seen == [False]  # keyword names are only suggested, not confirmed
 
 
 def _vec(rng, base, noise=0.3):

@@ -14,7 +14,7 @@ export function PeoplePage() {
 
   useEffect(() => { refresh() }, [refresh])
 
-  // Keywords.txt lists ~350 people; most have no photos yet.
+  // Person keywords seeded from the files' vocabulary can outnumber photographed people.
   const active = people.filter(p => p.photos > 0 || p.confirmed > 0 || p.suggested > 0)
   const shown = (showAll || filter ? people : active)
     .filter(p => p.name.toLowerCase().includes(filter.toLowerCase()) ||
@@ -122,7 +122,20 @@ function FamilyCard({ person, onChanged }: { person: PersonDetail; onChanged: ()
     if (r) { setRel(r); onChanged() }
   }
 
-  const group = (title: string, relation: 'parent' | 'child' | 'partner', list: Relatives['parents'], noun: string) => (
+  async function endPartnership(other: number, ended: boolean) {
+    let year: number | null = null
+    if (ended) {
+      const text = window.prompt('Year the partnership ended (leave blank if unknown)', '')
+      if (text === null) return
+      year = text.trim() ? Number(text) : null
+      if (year !== null && !Number.isInteger(year)) return
+    }
+    const r = await run(() => api.setPartnership(person.id, other, ended, year))
+    if (r) { setRel(r); onChanged() }
+  }
+
+  const group = (title: string, relation: 'parent' | 'child' | 'partner', list: Relatives['parents'], noun: string,
+                 former = false) => (
     <div className="family-group">
       <div className="muted small">{title}</div>
       <div className="row">
@@ -130,11 +143,18 @@ function FamilyCard({ person, onChanged }: { person: PersonDetail; onChanged: ()
           <span key={r.id} className="kw person">
             <Link to={`/people/${r.id}`}>{r.name}</Link>
             {r.relation && <span className="muted small"> {r.relation}</span>}
+            {former && <span className="muted small"> {r.end_year ? `ended ${r.end_year}` : 'ended'}</span>}
+            {relation === 'partner' && (
+              <button title={former ? 'Partners again' : 'Mark as a former partner'}
+                onClick={() => endPartnership(r.id, !former)}>{former ? '↺' : 'ended'}</button>
+            )}
             <button title="Remove link" onClick={() => remove(relation, r.id)}>×</button>
           </span>
         ))}
-        <PersonPicker buttonLabel="Add" placeholder={`Add ${noun}…`} excludeId={person.id} clearOnPick
-          onPick={who => add(relation, who)} />
+        {!former && (
+          <PersonPicker buttonLabel="Add" placeholder={`Add ${noun}…`} excludeId={person.id} clearOnPick
+            onPick={who => add(relation, who)} />
+        )}
       </div>
     </div>
   )
@@ -145,6 +165,7 @@ function FamilyCard({ person, onChanged }: { person: PersonDetail; onChanged: ()
       {!rel.curator && <p className="muted small">Set the curator on the Library page so relatives are labelled from them.</p>}
       {group('Parents', 'parent', rel.parents, 'parent')}
       {group('Partners', 'partner', rel.partners, 'partner')}
+      {rel.former_partners.length > 0 && group('Former partners', 'partner', rel.former_partners, 'partner', true)}
       {group('Children', 'child', rel.children, 'child')}
       {rel.siblings.length > 0 && (
         <div className="family-group">

@@ -305,6 +305,7 @@ button.danger:disabled { opacity: .5; }
 .tree svg { position: absolute; left: 0; top: 0; pointer-events: none; }
 .tree-parent { fill: none; stroke: var(--muted, #888); stroke-width: 1.5; }
 .tree-partner { stroke: var(--accent, #c0392b); stroke-width: 2; }
+.tree-partner.ended { stroke-dasharray: 4 4; opacity: .6; }
 .tree-node { position: absolute; box-sizing: border-box; display: flex; flex-direction: column; align-items: center;
   padding: 6px 4px; border: 1px solid var(--border, #ddd); border-radius: 8px; background: var(--card, #fff);
   text-decoration: none; color: inherit; overflow: hidden; }

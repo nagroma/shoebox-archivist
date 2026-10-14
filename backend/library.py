@@ -24,6 +24,11 @@ LIB_DIR = ".shoebox"
 # Starting points offered when a library is created. Facets are plain data: the person
 # creating the library can add, remove and retype them, and each library keeps its own.
 PRESETS: dict[str, dict] = {
+    "files": {
+        "label": "Only the groups in my photos",
+        "help": "Exactly the top-level keyword groups already in the files; nothing is invented",
+        "facets": [],
+    },
     "family": {
         "label": "Family archive",
         "help": "People, community groups, events, places, subjects, format, curation, source",
@@ -153,19 +158,36 @@ def scan(folder: Path, progress: Progress | None = None) -> dict:
             "paths": dict(paths), "flat": dict(flat), "top": dict(top)}
 
 
+def _group_summary(found: dict | None) -> dict[str, dict]:
+    """Per top-level group (lower-case name): sample keywords and a people hint."""
+    leaves: dict[str, Counter] = {}
+    for path, n in (found or {}).get("paths", {}).items():
+        leaves.setdefault(keywords.top_level(path).lower(), Counter())[path.split("|")[-1]] += n
+    return {k: keywords.group_hint(dict(c)) for k, c in leaves.items()}
+
+
 def propose_facets(found: dict | None, preset: str = "family") -> list[dict]:
     """Facets for a new library: the preset's, plus every top-level keyword group found
-    in the files that the preset doesn't already have (kind guessed from its name)."""
-    facets = [{**f, "found": 0, "from_files": False} for f in PRESETS[preset]["facets"]]
+    in the files that the preset doesn't already have (kind guessed from its name; groups
+    full of person-like names are flagged, not silently typed)."""
+    summary = _group_summary(found)
+    facets = [{**f, "found": 0, "from_files": False, "samples": [], "keywords": 0,
+               "looks_like_people": False} for f in PRESETS[preset]["facets"]]
     by_name = {f["name"].lower(): f for f in facets}
     for name, n in sorted((found or {}).get("top", {}).items()):
+        info = summary.get(name.lower(), {"samples": [], "keywords": 0, "looks_like_people": False})
         f = by_name.get(name.lower())
         if f:
-            f["found"] = n
+            f.update(found=n, **info)
         else:
             facets.append({"name": name, "kind": keywords.guess_kind(name),
-                           "found": n, "from_files": True})
+                           "found": n, "from_files": True, **info})
     return facets
+
+
+def default_preset(found: dict | None) -> str:
+    """Folders that already have keyword groups start from those; empty folders from the family preset."""
+    return "files" if (found or {}).get("top") else "family"
 
 
 # ------------------------------------------------------------------ create / reset
@@ -229,9 +251,11 @@ def reset(root: Path) -> None:
     data = data_dir_for(root)
     if data.name != LIB_DIR:  # paranoia: only ever delete our own folder
         raise ValueError("not a library data folder")
-    shutil.rmtree(data)
+    # Close the library first: a request arriving mid-delete must not find it "open" and
+    # re-create an empty database in the folder being removed.
     if _current and _current.resolve() == data.resolve():
         use_data_dir(None)
+    shutil.rmtree(data)
     last = last_library_raw()
     if last and Path(last).resolve() == Path(root).resolve():
         remember(None)

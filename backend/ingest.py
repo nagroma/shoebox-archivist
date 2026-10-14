@@ -22,6 +22,59 @@ BACK_SUFFIX = re.compile(r"[ _-](b|back|reverse|verso|bk)$", re.I)
 FRONT_SUFFIX = re.compile(r"[ _-](a|f|front|recto)$", re.I)
 
 
+# Epson FastFoto saves "IMG_0001.jpg" (as scanned), "IMG_0001_a.jpg" (colour-corrected copy of
+# the same front) and "IMG_0001_b.jpg" (back). The "_a" file is only a copy when the plain
+# file is there too.
+ENHANCED_SUFFIX = re.compile(r"_a$", re.I)
+
+
+def enhanced_copies(fronts: list[Path]) -> list[Path]:
+    """The '<name>_a' files among one group's fronts that sit beside a plain '<name>' file."""
+    plain = [p for p in fronts if not FRONT_SUFFIX.search(p.stem)]
+    return [p for p in fronts if ENHANCED_SUFFIX.search(p.stem)
+            and any(q.stem.lower() == p.stem[:-2].lower() for q in plain)]
+
+
+def merge_enhanced(conn: sqlite3.Connection, thumbs: Path) -> tuple[int, list[str]]:
+    """Fold '<name>_a' fronts that were imported as separate photos into the photo of
+    '<name>' (libraries imported before enhanced copies were recognised). Their keywords and a
+    missing date move over; their faces are dropped - the original's faces stand for both.
+    One with a confirmed face is left alone and reported. Returns (merged, left_paths)."""
+    from . import actions
+    rows = conn.execute("SELECT id, photo_id, path FROM images WHERE role = 'front'").fetchall()
+    plain = {(Path(r["path"]).parent.as_posix().lower(), Path(r["path"]).stem.lower()): r
+             for r in rows if not FRONT_SUFFIX.search(Path(r["path"]).stem)}
+    merged, left = 0, []
+    for r in rows:
+        p = Path(r["path"])
+        if not ENHANCED_SUFFIX.search(p.stem):
+            continue
+        base = plain.get((p.parent.as_posix().lower(), p.stem[:-2].lower()))
+        if base is None or base["photo_id"] == r["photo_id"]:
+            continue
+        if conn.execute("SELECT 1 FROM faces WHERE image_id = ? AND status = 'confirmed'",
+                        (r["id"],)).fetchone():
+            left.append(r["path"])
+            continue
+        for f in conn.execute("SELECT id FROM faces WHERE image_id = ?", (r["id"],)).fetchall():
+            (thumbs / f"{f['id']}.jpg").unlink(missing_ok=True)
+        conn.execute("DELETE FROM faces WHERE image_id = ?", (r["id"],))
+        conn.execute("INSERT OR IGNORE INTO photo_keywords(photo_id, keyword_id, source) "
+                     "SELECT ?, keyword_id, source FROM photo_keywords WHERE photo_id = ?",
+                     (base["photo_id"], r["photo_id"]))
+        mine = conn.execute("SELECT date_text FROM photos WHERE id = ?", (r["photo_id"],)).fetchone()
+        theirs = conn.execute("SELECT date_text FROM photos WHERE id = ?",
+                              (base["photo_id"],)).fetchone()
+        if theirs["date_text"] is None and mine["date_text"]:
+            actions.set_photo_date(conn, base["photo_id"], mine["date_text"])
+        conn.execute("UPDATE images SET photo_id = ?, role = 'other', variant = 'enhanced', "
+                     "faces_scanned = 1 WHERE id = ?", (base["photo_id"], r["id"]))
+        conn.execute("DELETE FROM photos WHERE id = ?", (r["photo_id"],))
+        merged += 1
+    conn.commit()
+    return merged, left
+
+
 def rel_path(path: Path, root: Path) -> str:
     return path.resolve().relative_to(root).as_posix()
 
@@ -100,21 +153,25 @@ def register_images(conn: sqlite3.Connection, root: Path, folder: Path) -> tuple
     known = {r["path"] for r in conn.execute("SELECT path FROM images")}
     added = dupes = 0
     for key, g in groups.items():
-        new_fronts = [p for p in g["front"] if rel_path(p, root) not in known]
+        enhanced = enhanced_copies(g["front"])
+        originals = [p for p in g["front"] if p not in enhanced]
+        new_fronts = [p for p in originals if rel_path(p, root) not in known]
         new_backs = [p for p in g["back"] if rel_path(p, root) not in known]
-        if not new_fronts and not new_backs:
+        new_enhanced = [p for p in enhanced if rel_path(p, root) not in known]
+        if not new_fronts and not new_backs and not new_enhanced:
             continue
 
-        # Photo to attach backs to: existing photo of an already-known front, else a new one.
+        # Photo to attach backs / enhanced copies to: existing photo of an already-known
+        # front, else a new one.
         photo_for_backs = None
-        for p in g["front"]:
+        for p in originals:
             row = conn.execute("SELECT photo_id FROM images WHERE path = ?",
                                (rel_path(p, root),)).fetchone()
             if row:
                 photo_for_backs = row["photo_id"]
                 break
 
-        for p in new_fronts + new_backs:
+        for p in new_fronts + new_backs + new_enhanced:
             digest = sha1_of(p)
             dup = conn.execute("SELECT path FROM images WHERE sha1 = ?", (digest,)).fetchone()
             if dup:
@@ -122,6 +179,9 @@ def register_images(conn: sqlite3.Connection, root: Path, folder: Path) -> tuple
                 dupes += 1
                 continue
             role = "back" if p in new_backs else "front"
+            variant = None
+            if p in new_enhanced and photo_for_backs is not None:
+                role, variant = "other", "enhanced"
             if role == "front" or photo_for_backs is None:
                 photo_id = conn.execute("INSERT INTO photos DEFAULT VALUES").lastrowid
                 if photo_for_backs is None:
@@ -129,8 +189,8 @@ def register_images(conn: sqlite3.Connection, root: Path, folder: Path) -> tuple
             else:
                 photo_id = photo_for_backs
             conn.execute(
-                "INSERT INTO images(photo_id, role, path, sha1) VALUES (?, ?, ?, ?)",
-                (photo_id, role, rel_path(p, root), digest),
+                "INSERT INTO images(photo_id, role, path, sha1, variant) VALUES (?, ?, ?, ?, ?)",
+                (photo_id, role, rel_path(p, root), digest, variant),
             )
             added += 1
     conn.commit()
@@ -271,12 +331,13 @@ def ingest(conn: sqlite3.Connection, folder: Path, thumbs: Path,
         print(f"Removed {pruned} preview/cache images that aren't photos")
     for k in kept:
         print(f"  kept {k} (in an ignored folder but has named faces)", file=sys.stderr)
-    vocab = root_path / VOCABULARY_FILE
-    if vocab.exists():
-        from . import keywords
-        print(f"Loaded {keywords.load_vocabulary(conn, vocab)} keywords from {VOCABULARY_FILE}")
     added, dupes = register_images(conn, root_path, folder)
     print(f"Registered {added} new images ({dupes} duplicates skipped)")
+    merged, left = merge_enhanced(conn, thumbs)
+    if merged:
+        print(f"Folded {merged} enhanced (_a) copies into their originals")
+    for k in left:
+        print(f"  left {k} separate (it has a confirmed face)", file=sys.stderr)
     dated = read_metadata(conn, root_path, progress)
     print(f"Dated {dated} photos from file metadata")
     n_img, n_faces = scan_faces(conn, root_path, thumbs, det_size, progress, thorough)

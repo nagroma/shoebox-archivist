@@ -20,15 +20,19 @@ Must run on Windows and macOS. Plan: see docs/PLAN.md.
 
 ## Rules
 - Metadata lives in each photo's XMP (keywords in `lr:hierarchicalSubject`); read and write it with pyexiv2 (`backend/xmp.py`). Keyword conventions: docs/KEYWORD_RULES.md.
-- Bridge/Lightroom keywords are the mechanism: no app-specific keyword format. Each library has its own facets (top-level groups, each with a kind) in its DB; the app mirrors the file keywords and exports/imports `Keywords.txt`. Keyword `category` is the full parent path (`Places|USA`), `name` the leaf.
+- Bridge and Lightroom are used in parallel with this app (the collection owner manages their photos in Bridge); compatibility with both is a core requirement. Whatever the app writes must read cleanly in Bridge and Lightroom, and edits made there are picked up on the next import.
+- Existing keywords are never lost or silently duplicated. Every hierarchical or flat keyword in a file is kept with its exact path (`Ashdown|JuliaAshdown` stays `Ashdown|JuliaAshdown`, even though Bridge's `[Ashdown]` bracket suggests it shouldn't appear in files). The app does not invent a second keyword (`People|JuliaAshdown`) for something that already exists under another group; changing keyword paths is an explicit remap (file-wide, with provenance), never a side effect. New groups found in photos added later are surfaced for the user to add as a facet or map, not ignored.
+- The owner's current keyword design (see docs/KEYWORD_STRATEGY.md §1) differs from the app's default: `Ashdown|X`, `Marlowe|X`, `AshdownMarlowe|X` are people grouped by family, and `People` holds only people outside those three families. The default (`People` = everyone, `Family|<Name>` = family) is a proposal he has not accepted; the app must work with his structure unchanged (several `person` facets) and offer the migration (`pm regroup`) as an option, never assume it.
+- `Keywords.txt` and the legacy `PM_DATA`/`./data` library are from earlier iterations: do not build on them.
+- Bridge/Lightroom keywords are the mechanism: no app-specific keyword format. Each library has its own facets (top-level groups, each with a kind) in its DB; the app mirrors the file keywords and can export a `Keywords.txt` for Bridge/Lightroom (it never reads one). Keyword `category` is the full parent path (`Places|USA`), `name` the leaf.
 - Nothing in code or tests may assume one family's names. Collection-specific structure belongs in a library's facets/vocabulary (docs/KEYWORD_STRATEGY.md is one collection's proposal, kept as an example).
 - The app may modify original photos, but only with provenance:
-  - Every app-added keyword goes in `pm:AddedKeywords`.
-  - Edited fields keep their prior value in `pm:Original*`.
+  - Every app-added keyword goes in `sa:AddedKeywords`.
+  - Edited fields keep their prior value in `sa:Original*`.
   - `pm strip` undoes app edits; `pm baseline save/restore` snapshots the library for dev testing.
 - Never touch a Lightroom catalog.
 - Store paths relative to the library root with `/` separators.
-- Face naming is suggest-then-confirm. The only exception: a photo with exactly one person keyword and one detected face is auto-confirmed (`label_source='keyword'`).
+- Face naming is suggest-then-confirm. A photo with exactly one person keyword and one detected face is *suggested* from the keyword (`label_source='keyword'`) for bulk confirmation; the `keyword_autoconfirm` setting (default off) confirms it without review. Changes to existing keywords (`backend/regroup.py`, `pm regroup`) are previewed and need explicit confirmation.
 - Name changes: the keyword in the files stays under the person's primary (birth) name. Other names live in `person_names` (kind, `from_year`); photos dated from that year show the alias (`person_name` in `api.FACE_SQL`), and typing an alias resolves to the same person. Edit at `/people/<id>` ("Other names"), API `PUT /api/people/{id}/aliases`.
 - Family: only `relations` rows are stored (parent_of, partner) - siblings, grandparents, cousins and labels are derived from them by `backend/family.py`, measured from the library's curator. Labels are gender-neutral (no gender is recorded).
 - Family tree view: `GET /api/family/{id}?generations=N` (nodes with generation + links, from `family.circle`), drawn by `frontend/src/pages/Tree.tsx`; the photos list takes `family_id` + `generations`.
@@ -37,3 +41,4 @@ Must run on Windows and macOS. Plan: see docs/PLAN.md.
 - Dates are EDTF + date_min/date_max; see `backend/dates.py`.
 - Faces found only by an extra detection pass get `faces.candidate = 1`. They are kept out of clustering, matching and keyword auto-naming until a person clicks **Face** (`actions.verify_faces`). **Not a face** = status `ignored`.
 - `backend/candidates.py` scores pending candidates against earlier decisions, to sort and pre-select them in the UI only. Never auto-hide or auto-verify.
+- No real names in the repository, tests, docs or commit messages: use docs/FICTIONAL_NAMES.md. `tests/test_no_real_names.py` checks against gitignored local files (`Keywords.txt`, `.private-names.txt`). Refer to the collection owner as "the owner".

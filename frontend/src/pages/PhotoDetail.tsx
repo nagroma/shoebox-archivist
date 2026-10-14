@@ -24,6 +24,7 @@ export function PhotoDetailPage() {
   const [photo, setPhoto] = useState<PhotoDetail | null>(null)
   const [form, setForm] = useState<Form | null>(null)
   const [side, setSide] = useState<'front' | 'back'>('front')
+  const [version, setVersion] = useState<'original' | 'enhanced' | null>(null)  // null = follow Settings
   const [activeFace, setActiveFace] = useState<number | null>(search.get('face') ? Number(search.get('face')) : null)
   const [showBoxes, setShowBoxes] = useState(true)
 
@@ -33,7 +34,7 @@ export function PhotoDetailPage() {
     setForm(toForm(p))
   }, [photoId])
 
-  useEffect(() => { setSide('front'); load() }, [load])
+  useEffect(() => { setSide('front'); setVersion(null); load() }, [load])
 
   // Opened directly (not from the Photos list): step through all photos.
   const [, setSeqLoaded] = useState(false)
@@ -80,8 +81,11 @@ export function PhotoDetailPage() {
 
   const front = photo.images.find(i => i.role === 'front') ?? photo.images[0]
   const back = photo.images.find(i => i.role === 'back')
-  const shown = side === 'back' && back ? back : front
-  const faces = photo.faces.filter(f => f.image_id === shown.id)
+  const enhanced = photo.images.find(i => i.variant === 'enhanced')
+  const wantEnhanced = (version ?? (photo.show_enhanced ? 'enhanced' : 'original')) === 'enhanced'
+  const shown = side === 'back' && back ? back : wantEnhanced && enhanced ? enhanced : front
+  // Faces belong to the original; an enhanced copy has the same geometry.
+  const faces = photo.faces.filter(f => f.image_id === front.id)
 
   async function faceAct(fn: () => Promise<unknown>, msg: string) {
     if ((await run(fn, msg)) !== undefined) { await load(); refresh() }
@@ -96,6 +100,13 @@ export function PhotoDetailPage() {
           <button disabled={next === null} onClick={() => go(next)} title="Next (→)">Next ›</button>
           {idx >= 0 && <span className="muted small">{idx + 1} / {photoSequence.length}</span>}
           <span className="grow" />
+          {enhanced && side === 'front' && (
+            <div className="tabs">
+              <button className={!wantEnhanced ? 'active' : ''} onClick={() => setVersion('original')}>Original</button>
+              <button className={wantEnhanced ? 'active' : ''} onClick={() => setVersion('enhanced')}
+                title="The scanner's colour-corrected copy (_a)">Corrected</button>
+            </div>
+          )}
           {back && (
             <div className="tabs">
               <button className={side === 'front' ? 'active' : ''} onClick={() => setSide('front')}>Front</button>

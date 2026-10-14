@@ -32,3 +32,6 @@ Keywords.txt
 
 # Keyword restructuring proposal: contains real family names, delete once adopted
 docs/KEYWORD_STRATEGY.md
+
+# Real names to keep out of the repo (see tests/test_no_real_names.py)
+.private-names.txt

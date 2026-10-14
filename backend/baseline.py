@@ -5,7 +5,7 @@ The app writes keywords into the original photos. To test repeatedly:
     pm baseline restore    # put changed photos back and start a fresh database
 
 `pm strip` is the production-safe alternative: it removes only the keywords this
-app added (listed in each file's pm:AddedKeywords) and leaves everything else.
+app added (listed in each file's sa:AddedKeywords) and leaves everything else.
 """
 from __future__ import annotations
 

@@ -18,7 +18,7 @@ function Field({ k, label, data, draft, set, indent, children }: {
         {children ?? (typeof v === 'boolean'
           ? <input id={k} type="checkbox" checked={v} onChange={e => set(k, e.target.checked)} />
           : <input id={k} type="number" value={v as number} style={{ width: 90 }}
-              step={k === 'suggest_threshold' ? 0.01 : 1}
+              step={k === 'suggest_threshold' || k === 'cluster_merge_threshold' || k === 'neighbour_threshold' ? 0.01 : 1}
               onChange={e => set(k, Number(e.target.value))} />)}
       </div>
       <span className="help muted">{data.help[k]}</span>
@@ -87,7 +87,16 @@ export function SettingsPage() {
         <Field k="suggest_threshold" label="Suggestion threshold" {...props} />
         <Field k="keyword_autoconfirm" label="Name from keywords" {...props} />
         <Field k="min_cluster_size" label="Minimum cluster size" {...props} />
+        <Field k="cluster_merge_threshold" label="Cluster merge threshold" {...props} />
+        <Field k="neighbour_threshold" label="Likely-match threshold" {...props} />
         <Field k="preselect_non_faces" label="Pre-select likely non-faces" {...props} />
+      </section>
+
+      <section className="card">
+        <h2>Scanner copies</h2>
+        <p className="muted small">Epson FastFoto saves a colour-corrected <code>_a</code> copy beside each
+          original. It is the same photo: it shares the original's faces and keywords, which are written to both files.</p>
+        <Field k="show_enhanced" label="Show the corrected copy" {...props} />
       </section>
 
       <section className="card">

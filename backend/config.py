@@ -15,12 +15,17 @@ FIELDS: dict[str, tuple] = {
     "pass_enlarged": (True, bool, "extra pass at a larger detector size (small faces); thorough mode only"),
     "pass_rotated": (True, bool, "extra passes on rotated copies (tilted or lying-down heads)"),
     "suggest_threshold": (0.35, float, "similarity needed before a name is suggested (higher = fewer, safer suggestions)"),
-    "keyword_autoconfirm": (True, bool, "a photo keyworded with one person that shows one face: name that face"),
+    "keyword_autoconfirm": (False, bool, "a photo keyworded with one person that shows one face: confirm that face without review (off: it is only suggested)"),
     "min_cluster_size": (3, int, "smallest group of similar unnamed faces shown as a cluster"),
+    "neighbour_threshold": (0.30, float, "unnamed faces at least this similar to a named person are listed as likely matches for that person (lower = more, weaker matches)"),
+    "cluster_merge_threshold": (0.45, float, "unnamed groups of the same person are merged when their centres are this similar (lower = fewer, bigger clusters; 1 = never merge)"),
     "preselect_non_faces": (True, bool, "pre-select possible faces that look like earlier 'not a face' decisions"),
+    "show_enhanced": (True, bool, "show a scanner's colour-corrected copy (FastFoto '_a') instead of the original when a photo has both"),
 }
 CHOICES = {"detection_mode": ("thorough", "fast")}
-LIMITS = {"suggest_threshold": (0.1, 0.9), "min_cluster_size": (2, 20)}
+LIMITS = {"suggest_threshold": (0.1, 0.9), "min_cluster_size": (2, 20),
+          "cluster_merge_threshold": (0.2, 1.0),
+          "neighbour_threshold": (0.15, 0.9)}
 
 
 def defaults() -> dict:

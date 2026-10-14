@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { api, type Candidate, type Candidates, type Cluster, type Face, type PersonRef } from '../api'
+import { api, type Candidate, type Candidates, type Cluster, type Face, type MatchFace, type MatchGroup, type PersonRef } from '../api'
 import { FaceGrid } from '../components/FaceGrid'
 import { PersonPicker } from '../components/PersonPicker'
 import { useAction, useApp } from '../state'
@@ -11,12 +11,14 @@ export function ClustersPage() {
   const [showIgnored, setShowIgnored] = useState(false)
   const [ignored, setIgnored] = useState<Face[]>([])
   const [candidates, setCandidates] = useState<Candidates | null>(null)
+  const [matches, setMatches] = useState<MatchGroup[]>([])
   const [minSize, setMinSize] = useState<number | null>(null)
   const [busy, setBusy] = useState(false)
 
   const load = useCallback(async () => {
-    const [c, ig, cand] = await Promise.all([api.clusters(), api.ignored(), api.candidates()])
+    const [c, ig, cand, m] = await Promise.all([api.clusters(), api.ignored(), api.candidates(), api.matches()])
     setClusters(c)
+    setMatches(m)
     setIgnored(ig)
     setCandidates(cand)
     refresh()
@@ -62,7 +64,9 @@ export function ClustersPage() {
 
       {candidates && candidates.faces.length > 0 && <CandidatesCard data={candidates} onChanged={load} />}
 
-      {named.length === 0 && !loose && !candidates?.faces.length && <p className="empty">No unnamed faces. 🎉</p>}
+      {matches.map(g => <MatchCard key={g.person_id} group={g} onChanged={load} />)}
+
+      {named.length === 0 && !loose && matches.length === 0 && !candidates?.faces.length && <p className="empty">No unnamed faces. 🎉</p>}
 
       {named.map(c => <ClusterCard key={c.cluster_id} cluster={c} onChanged={load} />)}
       {loose && <ClusterCard cluster={loose} onChanged={load} />}
@@ -75,6 +79,61 @@ export function ClustersPage() {
         {showIgnored && <IgnoredGrid faces={ignored} onChanged={load} />}
       </section>
     </div>
+  )
+}
+
+/** Unnamed faces that look like someone already named, strongest match first. */
+function MatchCard({ group, onChanged }: { group: MatchGroup; onChanged: () => void }) {
+  const run = useAction()
+  const [selected, setSelected] = useState<Set<number>>(new Set())
+  const seeds = group.faces.filter(f => f.seed).length
+  const ids = [...selected]
+
+  async function act(fn: () => Promise<unknown>, msg: string) {
+    if (await run(fn, msg)) { setSelected(new Set()); onChanged() }
+  }
+
+  return (
+    <section className="card">
+      <div className="card-head">
+        <h2>
+          {group.guess ? `Is this ${group.name}?` : `Likely ${group.name}`}{' '}
+          <span className="muted">
+            ({group.faces.length} faces{group.guess
+              ? ` · none confirmed yet; the first ${seeds} are guesses from the photo's keywords`
+              : ` · ${group.confirmed} confirmed`})
+          </span>
+        </h2>
+        <div className="row">
+          <button onClick={() => setSelected(new Set(group.faces.map(f => f.id)))}>Select all</button>
+          <button onClick={() => setSelected(new Set())} disabled={selected.size === 0}>Clear</button>
+        </div>
+      </div>
+      {group.guess && (
+        <p className="muted small">
+          Check the guessed faces first. Confirm the ones that really are {group.name}; once one is confirmed the
+          rest are compared with it and this list gets more reliable.
+        </p>
+      )}
+      <FaceGrid faces={group.faces} selected={selected} onSelect={setSelected} showNames={false}
+        badge={f => {
+          const m = f as MatchFace
+          return m.seed
+            ? <span className="likely not_face" title="Guessed from the photo's keywords, not by looks">guess</span>
+            : m.similarity != null ? <span className="likely face" title="Similarity to the named faces">{Math.round(m.similarity * 100)}%</span> : null
+        }} />
+      <div className="action-bar">
+        <span className="scope">{selected.size ? `${selected.size} selected` : 'select faces first'}</span>
+        <button className="primary" disabled={!ids.length}
+          onClick={() => act(() => api.assign(ids, { person_id: group.person_id }), `Named ${ids.length} face(s) ${group.name}`)}>
+          Confirm as {group.name}
+        </button>
+        <button disabled={!ids.length}
+          onClick={() => act(() => api.notPerson(ids, group.person_id), `Not ${group.name}`)}>
+          Not {group.name}
+        </button>
+      </div>
+    </section>
   )
 }
 

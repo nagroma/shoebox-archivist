@@ -174,7 +174,7 @@ export function TreePage() {
                 if (e.kind === 'partner') {
                   const y = a.y + NODE_H / 2
                   const [l, r] = a.x < b.x ? [a, b] : [b, a]
-                  return <line key={i} className="tree-partner" x1={l.x + NODE_W} y1={y} x2={r.x} y2={y} />
+                  return <line key={i} className={`tree-partner${e.ended ? ' ended' : ''}`} x1={l.x + NODE_W} y1={y} x2={r.x} y2={y} />
                 }
                 const x1 = a.x + NODE_W / 2, y1 = a.y + NODE_H
                 const x2 = b.x + NODE_W / 2, y2 = b.y

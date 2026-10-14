@@ -106,8 +106,96 @@ def _facet_keyword_count(conn: sqlite3.Connection, name: str) -> int:
 
 
 def default_person_category(conn: sqlite3.Connection) -> str:
-    return next((f["name"] for f in get_facets(conn) if f["kind"] == "person"),
-                DEFAULT_PERSON_CATEGORY)
+    """Where a new person's keyword goes. With several person facets (Ashdown, Marlowe, People...)
+    the generic one (`People`) wins, so nobody is filed under a family they were not in."""
+    people = [f["name"] for f in get_facets(conn) if f["kind"] == "person"]
+    return next((n for n in people if n.lower() == DEFAULT_PERSON_CATEGORY.lower()),
+                people[0] if people else DEFAULT_PERSON_CATEGORY)
+
+
+NAME_SHAPE = re.compile(r"^[A-Z][a-z]+(?:[A-Z][a-z]+)+$")   # JuliaAshdown, NoahWren
+DISMISSED_SETTING = "dismissed_groups"
+
+
+def group_hint(leaves: dict[str, int]) -> dict:
+    """Most-used leaf keywords of a group and whether they look like people's names.
+    A hint only; the person picks the kind."""
+    names = sorted(leaves, key=lambda n: (-leaves[n], n))
+    shaped = sum(bool(NAME_SHAPE.match(n)) for n in names)
+    return {"samples": names[:5], "keywords": len(names),
+            "looks_like_people": len(names) >= 5 and shaped / len(names) >= 0.7}
+
+
+def unmapped_groups(conn: sqlite3.Connection) -> list[dict]:
+    """Top-level keyword groups in the library that match no facet (photos added later brought
+    them) and were not left alone on purpose. Libraries with no facets report nothing."""
+    facets = {f["name"].lower() for f in get_facets(conn)}
+    if not facets:
+        return []
+    try:
+        dismissed = {n.lower() for n in json.loads(db.get_setting(conn, DISMISSED_SETTING) or "[]")}
+    except ValueError:
+        dismissed = set()
+    groups: dict[str, dict] = {}
+    for r in conn.execute("SELECT k.category, k.name, COUNT(pk.photo_id) AS n FROM keywords k "
+                          "LEFT JOIN photo_keywords pk ON pk.keyword_id = k.id GROUP BY k.id"):
+        top = top_level(r["category"])
+        if top.lower() in facets | dismissed or top == OTHER_CATEGORY:
+            continue
+        g = groups.setdefault(top, {"name": top, "photos": 0, "_leaves": {}})
+        g["photos"] += r["n"]
+        g["_leaves"][r["name"]] = r["n"]
+    out = []
+    for g in groups.values():
+        leaves = g.pop("_leaves")
+        out.append({**g, **group_hint(leaves), "kind": guess_kind(g["name"])})
+    return sorted(out, key=lambda g: g["name"].lower())
+
+
+def adopt_group(conn: sqlite3.Connection, name: str, kind: str) -> list[dict]:
+    """Add an unmapped group as a facet of the given kind. File keywords are not touched;
+    person groups get their people rows so they can be matched to faces."""
+    facets = get_facets(conn)
+    if any(f["name"].lower() == name.lower() for f in facets):
+        raise ValueError(f"{name!r} is already a facet")
+    real = conn.execute("SELECT category FROM keywords WHERE lower(category) = lower(?) "
+                        "OR lower(category) LIKE lower(?) LIMIT 1", (name, name + "|%")).fetchone()
+    if not real:
+        raise ValueError(f"No keywords in a group called {name!r}")
+    name = top_level(real["category"])
+    out = set_facets(conn, facets + [{"name": name, "kind": kind}])
+    conn.execute("UPDATE keywords SET kind = ? WHERE category = ? OR category LIKE ?",
+                 (kind, name, name + "|%"))
+    if kind == "person":
+        for r in conn.execute("SELECT id, name FROM keywords WHERE person_id IS NULL AND "
+                              "(category = ? OR category LIKE ?)", (name, name + "|%")).fetchall():
+            other = conn.execute("SELECT person_id FROM keywords WHERE name = ? AND person_id "
+                                 "IS NOT NULL", (r["name"],)).fetchone()
+            pid = other["person_id"] if other else db.get_or_create_person(conn, display_name(r["name"]))
+            conn.execute("UPDATE keywords SET person_id = ? WHERE id = ?", (pid, r["id"]))
+    conn.commit()
+    return out
+
+
+def dismiss_group(conn: sqlite3.Connection, name: str) -> None:
+    """Leave a group as it is: it stays in the files and the database, and is not offered again."""
+    try:
+        left = json.loads(db.get_setting(conn, DISMISSED_SETTING) or "[]")
+    except ValueError:
+        left = []
+    if name.lower() not in {n.lower() for n in left}:
+        db.set_setting(conn, DISMISSED_SETTING, json.dumps([*left, name]))
+        conn.commit()
+
+
+def family_category(conn: sqlite3.Connection) -> str:
+    """Where family/branch keywords go: the library's own `Family` or `Families` group if it
+    has one (the owner's files have `Families|EastwickFamily`), else `Family`. Never a second group."""
+    names = {f["name"].lower(): f["name"] for f in get_facets(conn)}
+    for n in ("family", "families"):
+        if n in names:
+            return names[n]
+    return "Family"
 
 
 def kind_of(category: str, conn: sqlite3.Connection | None = None) -> str:
@@ -260,6 +348,15 @@ def person_keyword(conn: sqlite3.Connection, person_id: int) -> int:
     if row:
         return row["id"]
     name = conn.execute("SELECT name FROM people WHERE id = ?", (person_id,)).fetchone()["name"]
+    # The same name may already exist as a keyword in the files (`Ashdown|JuliaAshdown`) that no
+    # person owns yet: reuse it rather than inventing `People|JuliaAshdown` beside it.
+    row = conn.execute(
+        "SELECT k.id FROM keywords k LEFT JOIN photo_keywords pk ON pk.keyword_id = k.id "
+        "WHERE lower(k.name) = lower(?) AND k.person_id IS NULL AND k.kind = 'person' "
+        "GROUP BY k.id ORDER BY COUNT(pk.photo_id) DESC, k.id LIMIT 1", (keyword_name(name),)).fetchone()
+    if row:
+        conn.execute("UPDATE keywords SET person_id = ? WHERE id = ?", (person_id, row["id"]))
+        return row["id"]
     return conn.execute(
         "INSERT INTO keywords(category, name, kind, person_id) VALUES (?, ?, 'person', ?)",
         (default_person_category(conn), keyword_name(name), person_id)).lastrowid

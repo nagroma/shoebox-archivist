@@ -27,7 +27,7 @@ const NAMESPACES: Record<string, string> = {
 
 const BADGE = {
   app: ['app', 'Written by this app'],
-  changed: ['changed', 'This app has changed it (the original value is saved in pm:Original…)'],
+  changed: ['changed', 'This app has changed it (the original value is saved in sa:Original…)'],
   managed: ['managed', 'This app updates it when you edit keywords, caption, date or location'],
 } as const
 

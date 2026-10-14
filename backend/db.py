@@ -108,7 +108,7 @@ CREATE TABLE IF NOT EXISTS keywords (
 CREATE INDEX IF NOT EXISTS idx_keywords_person ON keywords(person_id);
 
 -- Keywords on a photo. source: 'file' = already in the file when ingested (the owner's),
--- 'app' = written to the file by this app (also listed in the file's pm:AddedKeywords).
+-- 'app' = written to the file by this app (also listed in the file's sa:AddedKeywords).
 CREATE TABLE IF NOT EXISTS photo_keywords (
     photo_id   INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
     keyword_id INTEGER NOT NULL REFERENCES keywords(id) ON DELETE CASCADE,
@@ -176,6 +176,12 @@ MIGRATIONS = [
     # with one person) | match (suggestion from face similarity).
     ("faces", "label_source", "TEXT"),
     ("photos", "date_original", "TEXT"),     # raw date from the file, before rules
+    # 'enhanced' = a scanner's colour-corrected copy of the front (Epson FastFoto '_a').
+    # Same photo: role 'other', no faces of its own, gets the same keywords as the original.
+    ("images", "variant", "TEXT"),
+    # A partnership that is over (kind 'partner' only), and the year it ended if known.
+    ("relations", "ended", "INTEGER NOT NULL DEFAULT 0"),
+    ("relations", "end_year", "INTEGER"),
 ]
 
 

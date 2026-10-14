@@ -146,8 +146,26 @@ def cmd_baseline(conn, args):
         print(f"Deleted the database, face thumbnails and cache in {DATA}")
 
 
+def cmd_regroup(conn, args):
+    """Convert family-name groups (Ashdown|JuliaAshdown) into People|JuliaAshdown + Family|Ashdown."""
+    from . import regroup
+    p = regroup.plan(conn, args.groups, args.people)
+    for g in p["groups"]:
+        print(f"{g['group']}: {len(g['people'])} keywords -> {p['people_category']}|<name> + {g['family_keyword']}")
+        for x in g["people"]:
+            print(f"  {x['name']:<24} {x['photos']:>4} photos{'  (People keyword exists: merged)' if x['merges_existing'] else ''}")
+        if g["skipped_deeper"]:
+            print(f"  {g['skipped_deeper']} deeper keywords under {g['group']} are left alone")
+    print(f"{p['photos']} photos would change.")
+    if not args.apply:
+        print("Nothing changed. Re-run with --apply to do it.")
+        return
+    r = regroup.apply(conn, args.groups, args.people)
+    print(f"Converted {r['converted']} keywords on photos ({r['failed']} failed). `pm strip` undoes it.")
+
+
 def cmd_strip(conn, args):
-    """Remove every keyword this app wrote to the files (pm:AddedKeywords)."""
+    """Remove every keyword this app wrote to the files (sa:AddedKeywords)."""
     root = db.library_root(conn)
     n_files = n_kw = 0
     for r in conn.execute("SELECT path FROM images").fetchall():
@@ -254,6 +272,13 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("folder", nargs="?", help="library folder (save only; default: library root)")
     s.add_argument("--keep-db", action="store_true", help="restore files but keep the database")
     s.set_defaults(func=cmd_baseline)
+
+    s = sub.add_parser("regroup", help="turn family-name groups (Ashdown|JuliaAshdown) into "
+                       "People|JuliaAshdown + Family|Ashdown (preview unless --apply)")
+    s.add_argument("groups", nargs="+", help="top-level groups, e.g. Ashdown Marlowe AshdownMarlowe")
+    s.add_argument("--people", help="person group to use (default: the library's person facet)")
+    s.add_argument("--apply", action="store_true", help="write the change (default: preview only)")
+    s.set_defaults(func=cmd_regroup)
 
     sub.add_parser("strip", help="undo everything this app wrote to the photo files"
                    ).set_defaults(func=cmd_strip)

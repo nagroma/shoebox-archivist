@@ -1,36 +1,43 @@
 # Backlog
 
-## Where we left off (2026-10-11)
-- Working libraries: `photos-am` (the curator's family, Morgan / Mulligan; fresh facets) and `photos-mt` (the friend's, legacy keyword set). Both are gitignored; app data lives in `<folder>/.shoebox/`.
-- Built this session: libraries created from the UI, facets, curator, aliases + dated names, family links + tree, branch keywords, keyword cleanup, damaged-metadata fallback.
-- Next candidates: the "How is X related to you?" prompt, former partner, branch-name override, a browser pass over the Library / Tree pages, GEDCOM import.
-- Restart the app: `cd frontend && npm run build`, then `uv run pm serve` (opens the last library). If `pm` is not found after moving the folder, run `uv sync`.
+Open work only. Delete an item when it is done (move it to PLAN.md if it needs a design). Newest ideas at the bottom of each section.
 
-Future work, not scheduled. Move an item to PLAN.md or delete it when done. Newest ideas go at the bottom of each section.
+## Where we left off (2026-10-13)
+- Ready for the collection owner's review; the browser pass for this session is considered done. Keep an eye out for rough edges on the Library page (setup screen, "New keyword groups", "Family-name groups", reset) and the likely-match cards when the owner tries them.
+- **Bridge check** still to do by hand: open a file the app wrote (a regroup on a *copy*) in Bridge/Lightroom and confirm the keywords read cleanly.
+- Real names: guarded by `tests/test_no_real_names.py` and `docs/FICTIONAL_NAMES.md`. Commit `02fab69` (public) still has a few real family names; the risk is judged low, so history is not rewritten. Just don't add more.
+- Next: step-by-step migration guide for the owner (backup, preview, convert, `pm strip` to undo), written from the rehearsal on a copy.
+- Restart the app: F5 in VS Code (builds the UI), or `uv run pm serve` after `npm run build` in `frontend`. If `pm` is not found after moving the folder, run `uv sync`.
 
 ## Names and keywords
 - Export aliases to Bridge/Lightroom as keyword synonyms, so searching a married name finds the person. Lightroom's Keywords.txt synonym format needs verifying first.
-- Rename a keyword in the files (record the old one in `pm:OriginalKeywords`, support `pm strip`).
+- Rename a keyword in the files (record the old one in `sa:OriginalKeywords`, support `pm strip`).
 - Show the dated alias (not the keyword name) on photo keyword chips.
 - Make the "unknown date -> circa year" placeholder rule configurable per library.
-- Generic KEYWORD_STRATEGY guide (current one is one collection's example).
-
-## Family tree
-- Done: parent/partner links, derived siblings and curator-relative labels (People page > Family).
-- Done: branch keywords (Tree page). Open: override a branch name (e.g. a double-barrelled or changed surname), run it automatically after link edits, `Family` facet auto-created in new libraries.
-- "How is X related to you?" prompt when a new person is named.
-- Done: visual tree (Tree tab) and family photo filter. Still open: side-of-family and branch keywords written to photos, printing/exporting the tree, collapsing large trees.
-- Gendered labels (Mother/Father, Aunt/Uncle) if a gender or title field is ever added.
-- Half-siblings, step-parents, adoption (all treated the same as parents for now).
-- Derived branch, generation and side keywords.
-- Optional GEDCOM import.
-
-## People and faces
-- Former partner (end of a partnership): a link flag/end year so ex-partners stop sharing branch keywords and show as 'former partner'.
-- Pets: tag as a non-person keyword; detect dog/cat faces rather than ignoring them.
-- Ignore many small background faces at once (size threshold, or ignore a whole cluster). Low priority: per-face Ignore works well enough.
+- Generic keyword-strategy guide (the local KEYWORD_STRATEGY.md is one collection's example and is not committed).
 
 ## Libraries
-- UI route back to a legacy (PM_DATA) library.
-- Browser test pass of the Library page (create / open / reset).
-- Initialization test of an existing library with keywords already in the files (re-init photos-am after a working period).
+- General remap utility for explicit keyword-path patterns beyond family-name groups (dry-run, provenance, previewed and confirmed).
+- Merge-duplicates action for libraries that already have the same person under two groups.
+- After `pm strip` restores removed keywords, the DB needs a re-ingest to see them again.
+- Regroup rule is provisional (every person in the group gets `Family|<Group>`). If the owner wants otherwise, make the family keyword opt-in per person.
+- Initialization test of an existing library with keywords already in the files (re-init the sample library after a working period).
+- The setup screen only hints that a group looks like people; consider reading the keyword structure from the owner's feedback.
+
+## Family tree
+- Branch keywords: override a branch name (double-barrelled or changed surname); `Family` facet auto-created in new libraries.
+- "How is X related to you?" prompt when a new person is named.
+- Side-of-family and generation keywords written to photos; printing/exporting the tree; collapsing large trees.
+- Picking one relationship label per person would need a gender or title field.
+- Half-siblings, step-parents, adoption (all treated the same as parents for now).
+- Former partner (end of a partnership): flag/end year so ex-partners stop sharing branch keywords.
+- Optional GEDCOM import.
+
+## Scanning
+- Confirm the FastFoto naming (`name.jpg`, `name_a.jpg`, `name_b.jpg`) on real output and that `pm ingest` merges earlier separate imports.
+- Other scanners' naming schemes, if they turn up.
+
+## People and faces
+- Pets: tag as a non-person keyword; detect dog/cat faces rather than ignoring them.
+- Ignore many small background faces at once (size threshold, or a whole cluster). Low priority.
+- Tune `cluster_merge_threshold` and `neighbour_threshold` on the owner's large folder (about 1,300 unnamed faces); the sample is too small to judge.

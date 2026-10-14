@@ -9,12 +9,13 @@ DateTimeOriginal). When the app changes a value it updates those copies too, so 
 apps don't show stale data - IPTC only if the file has an IPTC record, EXIF only for tags
 already present.
 
-Every keyword this app adds is also listed in its own namespace (pm:AddedKeywords),
+Every keyword this app adds is also listed in its own namespace (sa:AddedKeywords),
 so app changes can be told apart from the owner's and stripped again (`pm strip`).
-Edited fields (caption, date, location) keep their pre-app value in pm:Original*.
+An owner keyword the app removes (a regroup) is listed in sa:RemovedKeywords and restored by strip.
+Edited fields (caption, date, location) keep their pre-app value in sa:Original*.
 
 Fuzzy dates: photoshop:DateCreated gets the most precise plain date XMP allows
-('1975', '1975-05', '1975-05-01'); the full EDTF ('1975~', '1920/1925') goes in pm:DateEDTF.
+('1975', '1975-05', '1975-05-01'); the full EDTF ('1975~', '1920/1925') goes in sa:DateEDTF.
 """
 from __future__ import annotations
 
@@ -23,11 +24,13 @@ from pathlib import Path
 
 import pyexiv2
 
-# Namespace URI kept from the original project name: it is already written into photos,
-# and changing it would orphan existing pm: provenance (pm strip could no longer undo it).
+# The namespace URI is kept from the original project name (the prefix is only a label): it is
+# already written into photos, and changing it would orphan existing provenance (strip could not undo it).
 PM_NS = "http://photo-manager.local/ns/1.0/"
-HS, SUBJ, ADDED = "Xmp.lr.hierarchicalSubject", "Xmp.dc.subject", "Xmp.pm.AddedKeywords"
-DESC, DATE, EDTF, LOC = ("Xmp.dc.description", "Xmp.photoshop.DateCreated", "Xmp.pm.DateEDTF",
+HS, SUBJ, ADDED = "Xmp.lr.hierarchicalSubject", "Xmp.dc.subject", "Xmp.sa.AddedKeywords"
+# Owner keywords the app removed on purpose (a regroup); `pm strip` puts them back.
+REMOVED = "Xmp.sa.RemovedKeywords"
+DESC, DATE, EDTF, LOC = ("Xmp.dc.description", "Xmp.photoshop.DateCreated", "Xmp.sa.DateEDTF",
                          "Xmp.iptc.Location")  # Iptc4xmpCore:Location
 # field -> where its value from before the app's first edit is kept
 IPTC_KW, IPTC_CAPTION, IPTC_DATE, IPTC_SUBLOC = (
@@ -35,18 +38,18 @@ IPTC_KW, IPTC_CAPTION, IPTC_DATE, IPTC_SUBLOC = (
     "Iptc.Application2.SubLocation")
 EXIF_DESC, EXIF_DTO, EXIF_XPKW = ("Exif.Image.ImageDescription", "Exif.Photo.DateTimeOriginal",
                                   "Exif.Image.XPKeywords")
-ORIGINALS = {DESC: "Xmp.pm.OriginalDescription", DATE: "Xmp.pm.OriginalDateCreated",
-             LOC: "Xmp.pm.OriginalLocation",
-             IPTC_CAPTION: "Xmp.pm.OriginalIptcCaption", IPTC_DATE: "Xmp.pm.OriginalIptcDateCreated",
-             IPTC_SUBLOC: "Xmp.pm.OriginalIptcSubLocation",
-             EXIF_DESC: "Xmp.pm.OriginalExifImageDescription",
-             EXIF_DTO: "Xmp.pm.OriginalExifDateTimeOriginal"}
+ORIGINALS = {DESC: "Xmp.sa.OriginalDescription", DATE: "Xmp.sa.OriginalDateCreated",
+             LOC: "Xmp.sa.OriginalLocation",
+             IPTC_CAPTION: "Xmp.sa.OriginalIptcCaption", IPTC_DATE: "Xmp.sa.OriginalIptcDateCreated",
+             IPTC_SUBLOC: "Xmp.sa.OriginalIptcSubLocation",
+             EXIF_DESC: "Xmp.sa.OriginalExifImageDescription",
+             EXIF_DTO: "Xmp.sa.OriginalExifDateTimeOriginal"}
 UNSET = "(none)"
 KEYWORD_KEYS = (HS, SUBJ, IPTC_KW)
-MANAGED = (*KEYWORD_KEYS, *ORIGINALS)  # every tag this app may write (besides its own pm:*)  # marks "the field was empty before the app set it"
+MANAGED = (*KEYWORD_KEYS, *ORIGINALS)  # every tag this app may write (besides its own sa:*)  # marks "the field was empty before the app set it"
 
 # Register namespaces before writing, or exiv2 renames unknown prefixes (ff -> prefix0_1_).
-for _uri, _prefix in [(PM_NS, "pm"), ("http://fastfoto.com/1.0/", "ff"),
+for _uri, _prefix in [(PM_NS, "sa"), ("http://fastfoto.com/1.0/", "ff"),
                       ("http://ns.adobe.com/bridge/1.0/", "kbrg")]:
     try:
         pyexiv2.registerNs(_uri, _prefix)
@@ -59,6 +62,7 @@ class XmpInfo:
     keywords: list[str] = field(default_factory=list)   # 'Category|Name'
     flat: list[str] = field(default_factory=list)       # dc:subject
     app_added: list[str] = field(default_factory=list)  # subset of keywords added by us
+    removed: list[str] = field(default_factory=list)    # owner keywords we removed (sa:RemovedKeywords)
     date_created: str | None = None
     date_edtf: str | None = None        # set by this app
     description: str | None = None
@@ -98,6 +102,7 @@ def read(path: Path) -> XmpInfo:
         keywords=_list(x.get(HS)),
         flat=_list(x.get(SUBJ)),
         app_added=_list(x.get(ADDED)),
+        removed=_list(x.get(REMOVED)),
         date_created=x.get(DATE) or None,
         date_edtf=x.get(EDTF) or None,
         description=_lang_alt(x.get(DESC)),
@@ -149,7 +154,7 @@ def write_fields(path: Path, *, description: str | None | bool = False,
                  date_created: str | None | bool = False, date_edtf: str | None = None,
                  location: str | None | bool = False) -> None:
     """Write caption / date / location into the file (False = leave alone, None = clear).
-    The first time the app changes a field its previous value is saved in pm:Original*."""
+    The first time the app changes a field its previous value is saved in sa:Original*."""
     with pyexiv2.Image(str(path)) as im:
         cur = {"Xmp": im.read_xmp(), "Iptc": im.read_iptc(), "Exif": im.read_exif()}
         out: dict = {"Xmp": {}, "Iptc": {}, "Exif": {}}
@@ -204,9 +209,13 @@ def leaf(keyword: str) -> str:
 
 
 def _write(path: Path, hs: list[str], flat: list[str], added: list[str],
-           iptc_add: list[str] = (), iptc_remove: set[str] = frozenset()) -> None:
+           iptc_add: list[str] = (), iptc_remove: set[str] = frozenset(),
+           removed: list[str] | None = None) -> None:
     with pyexiv2.Image(str(path)) as im:
-        im.modify_xmp({HS: hs or None, SUBJ: flat or None, ADDED: added or None})
+        fields = {HS: hs or None, SUBJ: flat or None, ADDED: added or None}
+        if removed is not None:
+            fields[REMOVED] = removed or None
+        im.modify_xmp(fields)
         iptc = im.read_iptc()
         if iptc:  # keep Bridge's IPTC copy in step
             kws = [k for k in _list(iptc.get(IPTC_KW)) if k not in iptc_remove]
@@ -235,11 +244,21 @@ def remove_keywords(path: Path, keywords: list[str], only_app_added: bool = True
     hs = [k for k in info.keywords if k not in gone]
     still = {leaf(k) for k in hs}
     flat = [f for f in info.flat if f in still or f not in {leaf(k) for k in gone}]
+    owner = [k for k in gone if k not in info.app_added]   # owner's own: remember to restore
+    removed = info.removed + [k for k in owner if k not in info.removed] if owner else None
     _write(path, hs, flat, [k for k in info.app_added if k not in gone],
-           iptc_remove={leaf(k) for k in gone} - still)
+           iptc_remove={leaf(k) for k in gone} - still, removed=removed)
     return gone
 
 
 def strip_app_keywords(path: Path) -> list[str]:
-    """Undo everything this app wrote to the file's keywords."""
-    return remove_keywords(path, read(path).app_added)
+    """Undo everything this app wrote to the file's keywords, and put back owner keywords it removed."""
+    info = read(path)
+    gone = remove_keywords(path, info.app_added)
+    back = [k for k in info.removed if k not in read(path).keywords]
+    if info.removed:
+        cur = read(path)
+        flat = cur.flat + [leaf(k) for k in back if leaf(k) not in cur.flat]
+        _write(path, cur.keywords + back, flat, cur.app_added,
+               iptc_add=[leaf(k) for k in back], removed=[])
+    return gone

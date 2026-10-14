@@ -68,12 +68,12 @@ Everyone who appears in your photos, with photo and face counts.
 - **Open a person** to:
   - Set **birth/death years**. The app then won't suggest them in photos dated outside their lifetime.
   - Review their **suggested faces**: select the wrong ones, reject them, and confirm the rest.
-  - **Name used from** (next to Born/Died): the year the main name came into use. Leave it blank for a name that was always theirs. Example: the main name "Ruth Morgan" with *Name used from 1984* and an *Other name* "Ruth Mulligan" (birth) shows Ruth Mulligan on photos dated before 1984 and Ruth Morgan after. If the year is unknown, she simply shows as Ruth Morgan everywhere.
+  - **Name used from** (next to Born/Died): the year the main name came into use. Leave it blank for a name that was always theirs. Example: the main name "Ruth Quill" with *Name used from 1984* and an *Other name* "Ruth Harcourt" (birth) shows Ruth Harcourt on photos dated before 1984 and Ruth Quill after. If the year is unknown, she simply shows as Ruth Quill everywhere.
   - **Notes** are for you only: they stay in the app and are never written to your photo files.
   - Add **Other names** (married name, nickname) with the year each started. The keyword in your files keeps the main name; the app shows the name that fits the photo's date, and typing any of the names finds the person.
-  - Fill in the **Family** card: add a person's parents, partners and children (type a name; new people are created). Siblings appear on their own from a shared parent. Everyone connected is then labelled relative to the library's **curator** (Parent, Grandparent, Aunt/Uncle, 1st cousin, Partner's parent...), shown on the People cards and the person's page. Set the curator on the **Library** page first.
+  - Fill in the **Family** card: add a person's parents, partners and children (type a name; new people are created). Siblings appear on their own from a shared parent. Everyone connected is then labelled relative to the library's **curator** (Mother/Father, Grandmother/Grandfather, Aunt/Uncle, 1st cousin, Partner's mother/father...), shown on the People cards and the person's page. Set the curator on the **Library** page first.
   - Click **Family tree** to see their family drawn out: parents above, children below, partners side by side. Pick 1-4 generations, click anyone to centre the tree on them, or click **Photos of this family** to list every photo containing someone in that circle. The **Tree** tab shows the curator's tree.
-  - On the **Tree** page, **Branch keywords** writes `Family|Morgan`, `Family|Mulligan`... into the photos so a family can be searched in Bridge. A person gets the branch of every top ancestor they descend from, so a child of two families has both. A married-in partner keeps their own branch (so Jennifer Driver stays `Morgan`). Review the preview, then click **Write branch keywords to photos**. After that first time, naming a person on a photo updates that photo's branch keywords automatically; re-run the button after changing family links. A married-in partner (like a husband outside the curator's family) gets only their own branch; the blood relative gets both. `pm strip` removes them.
+  - On the **Tree** page, **Branch keywords** writes `Family|Quill`, `Family|Harcourt`... into the photos so a family can be searched in Bridge. A person gets the branch of every top ancestor they descend from, so a child of two families has both. A married-in partner keeps their own branch (so Jennifer Driver stays `Quill`). Review the preview, then click **Write branch keywords to photos**. After that first time, naming a person on a photo updates that photo's branch keywords automatically; re-run the button after changing family links. A married-in partner (like a husband outside the curator's family) gets only their own branch; the blood relative gets both. `pm strip` removes them.
   - Choose a **cover** face, **merge** two people who are really the same person, or delete a person.
 
 **Deleting a mistake keyword** (e.g. a stray "Jenni"): if a person was created by mistake, open them and click **Delete person**; their unused keywords go with them. Any other keyword that is on no photo appears under **Library → Unused keywords** with a × to delete it. A keyword that is on photos must first be removed from those photos.
@@ -118,7 +118,7 @@ Faces that haven't been confirmed yet, grouped into **clusters** of faces that l
 | Enlarged pass | On | Looks again at a larger size. Helps with small faces in group photos. Thorough mode only. |
 | Rotated passes | On | Looks again with the photo turned. Finds tilted or lying-down heads. |
 | **Suggestion threshold** | 0.35 | How alike a face must be to a known person before their name is suggested. Higher means fewer but safer suggestions. |
-| **Name from keywords** | On | A photo keyworded with one person that shows one face: name that face automatically. |
+| **Name from keywords** | Off | A photo keyworded with one person that shows one face: confirm that face without review. Off, the face is only suggested from the keyword and you confirm in bulk. |
 | **Minimum cluster size** | 3 | The smallest group of look-alike faces shown as a cluster on the Faces page. |
 | **Pre-select likely non-faces** | On | On the Faces page, pre-select possible faces that look like earlier *Not a face* answers. |
 
@@ -129,7 +129,7 @@ Faces that haven't been confirmed yet, grouped into **clusters** of faces that l
 ---
 
 ## How the app learns
-- When a photo has **one person keyword and one face**, that face is named automatically. This is the only time the app names a face without asking, and it can be turned off in **Settings**.
+- When a photo has **one person keyword and one face**, that face is *suggested* from the keyword, and you confirm the suggestions in bulk. Turning on **Name from keywords** in **Settings** skips that review; it is off by default.
 - In a photo with several people keywords, faces are matched only against those people. If one face and one name are left over, the name is suggested "by elimination".
 - Every name you confirm improves future suggestions. Rejections are remembered too.
 - Your **Face / Not a face** answers on possible faces teach the app what a false detection looks like, so later possible faces are sorted and pre-selected for you.

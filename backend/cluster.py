@@ -30,10 +30,41 @@ def cluster(conn: sqlite3.Connection, min_cluster_size: int | None = None) -> in
     # Embeddings are L2-normalized, so euclidean distance is monotonic in cosine.
     labels = HDBSCAN(min_cluster_size=min_cluster_size, min_samples=2,
                      cluster_selection_method="leaf", copy=True).fit_predict(vecs)
+    labels = merge_similar(vecs, labels, config.get(conn, "cluster_merge_threshold"))
     conn.executemany("UPDATE faces SET cluster_id = ? WHERE id = ?",
                      [(int(l), r["id"]) for l, r in zip(labels, rows)])
     conn.commit()
     return len(set(labels.tolist()) - {-1})
+
+
+def merge_similar(vecs: np.ndarray, labels: np.ndarray, threshold: float) -> np.ndarray:
+    """HDBSCAN's 'leaf' selection splits one person into several tight groups (pose, age,
+    lighting, print quality). Merge clusters whose centres are at least `threshold` similar
+    (cosine), most similar pair first, so a person is one cluster to review. Noise (-1)
+    stays noise. Different people sit far below any sensible threshold (about 0.3 at most)."""
+    labels = labels.copy()
+    ids = [int(l) for l in sorted(set(labels.tolist()) - {-1})]
+    if len(ids) < 2 or threshold >= 1:
+        return labels
+    sums = {i: vecs[labels == i].sum(axis=0) for i in ids}
+    size = {i: int((labels == i).sum()) for i in ids}
+
+    def unit(v):
+        return v / (np.linalg.norm(v) or 1.0)
+
+    while len(sums) > 1:
+        keys = list(sums)
+        cent = np.stack([unit(sums[k]) for k in keys])
+        sim = cent @ cent.T
+        np.fill_diagonal(sim, -1)
+        a, b = np.unravel_index(int(np.argmax(sim)), sim.shape)
+        if sim[a, b] < threshold:
+            break
+        keep, gone = keys[a], keys[b]
+        sums[keep] = sums[keep] + sums.pop(gone)
+        size[keep] += size.pop(gone)
+        labels[labels == gone] = keep
+    return labels
 
 
 CSS = """

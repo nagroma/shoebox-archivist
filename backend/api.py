@@ -15,8 +15,8 @@ from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageOps
 from pydantic import BaseModel
 
-from . import (actions, candidates, cluster, config, dates, db, faces, family, ingest,
-               keywords, library, match, names, xmp)
+from . import (actions, candidates, cluster, config, dates, db, faces, family, ingest, neighbours,
+               keywords, library, match, names, regroup, xmp)
 
 FRONTEND = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 SIZES = {"thumb": 320, "large": 2000}
@@ -32,7 +32,11 @@ def _need_library() -> Path:
 
 
 def get_conn() -> Iterator[sqlite3.Connection]:
-    conn = db.connect(_need_library())
+    path = _need_library()
+    if path.parent.name == library.LIB_DIR and not path.exists():   # deleted underneath us (reset): never re-create it as an empty library
+        library.use_data_dir(None)
+        raise HTTPException(409, "The library was reset; choose a folder again")
+    conn = db.connect(path)
     try:
         yield conn
     finally:
@@ -130,6 +134,25 @@ def clusters(conn=Conn):
     return out
 
 
+@app.get("/api/matches")
+def matches(conn=Conn):
+    """Unnamed faces that look like people already named, grouped by person (see neighbours.py)."""
+    gs = neighbours.groups(conn)
+    ids = [f["face_id"] for g in gs for f in g["faces"]]
+    by_id = {}
+    if ids:
+        for r in conn.execute(FACE_SQL + f" WHERE f.id IN ({','.join('?' * len(ids))})", ids):
+            by_id[r["id"]] = r
+    names = {r["id"]: r["name"] for r in conn.execute("SELECT id, name FROM people")}
+    out = []
+    for g in gs:
+        faces = [{**face_json(by_id[f["face_id"]]), "similarity": f["similarity"], "seed": f["seed"]}
+                 for f in g["faces"] if f["face_id"] in by_id]
+        out.append({"person_id": g["person_id"], "name": names.get(g["person_id"], "?"),
+                    "confirmed": g["confirmed"], "guess": g["guess"], "faces": faces})
+    return out
+
+
 class ReclusterIn(BaseModel):
     min_size: int | None = None      # None = from Settings
     threshold: float | None = None
@@ -166,6 +189,16 @@ def faces_assign(body: AssignIn, conn=Conn):
 @app.post("/api/faces/reject")
 def faces_reject(body: FacesIn, conn=Conn):
     n = actions.reject(conn, body.face_ids)
+    return {"rejected": n, "suggestions": actions.resuggest(conn)}
+
+
+class NotPersonIn(FacesIn):
+    person_id: int
+
+
+@app.post("/api/faces/not-person")
+def faces_not_person(body: NotPersonIn, conn=Conn):
+    n = actions.reject_person(conn, body.face_ids, body.person_id)
     return {"rejected": n, "suggestions": actions.resuggest(conn)}
 
 
@@ -224,7 +257,7 @@ def settings_put(body: dict, conn=Conn):
         raise HTTPException(400, str(e))
     if any(old[k] != new[k] for k in ("suggest_threshold", "keyword_autoconfirm")):
         actions.resuggest(conn)
-    if old["min_cluster_size"] != new["min_cluster_size"]:
+    if any(old[k] != new[k] for k in ("min_cluster_size", "cluster_merge_threshold")):
         cluster.cluster(conn)
     return settings_get(conn)
 
@@ -378,8 +411,11 @@ def _relatives_json(conn: sqlite3.Connection, pid: int) -> dict:
     lab = family.labels(conn, cur["id"] if cur else None)
     shown = _current_names(conn)
     out: dict = {"relation": lab.get(pid), "curator": cur}
+    ends = family.end_years(conn, pid)
     for kind, ids in family.relatives(conn, pid).items():
-        out[kind] = [{"id": i, "name": shown[i], "relation": lab.get(i)} for i in ids]
+        out[kind] = [{"id": i, "name": shown[i], "relation": lab.get(i),
+                      **({"end_year": ends.get(i)} if kind == "former_partners" else {})}
+                     for i in ids]
     return out
 
 
@@ -408,6 +444,22 @@ def person_relative_add(pid: int, body: RelativeIn, conn=Conn):
     except ValueError as e:
         conn.rollback()
         raise HTTPException(400, str(e))
+    conn.commit()
+    return _relatives_json(conn, pid)
+
+
+class PartnershipIn(BaseModel):
+    ended: bool
+    end_year: int | None = None
+
+
+@app.put("/api/people/{pid}/partners/{other}")
+def person_partnership(pid: int, other: int, body: PartnershipIn, conn=Conn):
+    """Mark a partnership as ended (former partner, optional year) or current again."""
+    try:
+        family.set_ended(conn, pid, other, body.ended, body.end_year)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
     conn.commit()
     return _relatives_json(conn, pid)
 
@@ -551,9 +603,11 @@ def photos(filter: str = "all", person_id: int | None = None, q: str | None = No
              AND f.status = 'confirmed') AS named
         FROM photos ph
         JOIN images i ON i.id = (SELECT id FROM images WHERE photo_id = ph.id
-                                 ORDER BY role = 'front' DESC, id LIMIT 1)
+                                 ORDER BY (COALESCE(variant, '') = 'enhanced' AND ?) DESC,
+                                          role = 'front' DESC, id LIMIT 1)
         WHERE {' AND '.join(where)}
-        ORDER BY ph.date_min IS NULL, ph.date_min, i.path""", params).fetchall()
+        ORDER BY ph.date_min IS NULL, ph.date_min, i.path""",
+        [int(config.get(conn, "show_enhanced")), *params]).fetchall()
     out = []
     for r in rows:
         d = dict(r)
@@ -572,7 +626,7 @@ def photo_file_metadata(photo_id: int, conn=Conn):
         raise HTTPException(404)
     tags, warning = xmp.read_all_safe(path)
     x = tags["xmp"]
-    app = {k: "app" for k in x if k.startswith("Xmp.pm.")}
+    app = {k: "app" for k in x if k.startswith("Xmp.sa.")}
     for key in xmp.MANAGED:
         if any(key in group for group in tags.values()):
             changed = xmp.ORIGINALS.get(key) in x or (
@@ -587,11 +641,12 @@ def photo(photo_id: int, conn=Conn):
     if ph is None:
         raise HTTPException(404)
     images = [dict(r) for r in conn.execute(
-        "SELECT id, role, path, width, height, is_bw FROM images WHERE photo_id = ? "
+        "SELECT id, role, variant, path, width, height, is_bw FROM images WHERE photo_id = ? "
         "ORDER BY role = 'front' DESC, id", (photo_id,))]
     faces = [face_json(r) for r in conn.execute(
         FACE_SQL + " WHERE i.photo_id = ? ORDER BY f.x1", (photo_id,))]
     return {**dict(ph), "date": date_json(ph["date_text"]), "images": images, "faces": faces,
+            "show_enhanced": config.get(conn, "show_enhanced"),
             "keywords": photo_keywords(conn, photo_id)}
 
 
@@ -949,10 +1004,13 @@ def library_inspect(body: FolderIn):
 
 
 @app.get("/api/library/inspect/status")
-def library_inspect_status(preset: str = "family"):
+def library_inspect_status(preset: str = "auto"):
     s = dict(SCAN.state)
-    if s.get("result") is not None and preset in library.PRESETS:
+    if s.get("result") is not None and (preset == "auto" or preset in library.PRESETS):
         r = s["result"]
+        if preset == "auto":
+            preset = library.default_preset(r)
+        s["preset"] = preset
         s["facets"] = library.propose_facets(r, preset)
         top_paths = sorted(r["paths"].items(), key=lambda kv: -kv[1])[:200]
         s["result"] = {**r, "paths": dict(top_paths), "n_paths": len(r["paths"]),
@@ -1064,6 +1122,70 @@ def facets_put(body: list[FacetIn], conn=Conn):
     except ValueError as e:
         raise HTTPException(400, str(e))
     return library.describe(conn)["facets"]
+
+
+class GroupIn(BaseModel):
+    name: str
+    action: str            # 'facet' | 'leave'
+    kind: str = "other"
+
+
+@app.get("/api/groups/unmapped")
+def groups_unmapped(conn=Conn):
+    """Keyword groups that came in with later photos and match no facet."""
+    return keywords.unmapped_groups(conn)
+
+
+@app.post("/api/groups/resolve")
+def groups_resolve(body: GroupIn, conn=Conn):
+    """Add an unmapped group as a facet, or leave it alone. Photo files are never changed."""
+    if body.action == "leave":
+        keywords.dismiss_group(conn, body.name)
+    elif body.action == "facet":
+        if body.kind not in keywords.FACET_KINDS:
+            raise HTTPException(400, f"Unknown kind {body.kind!r}")
+        try:
+            keywords.adopt_group(conn, body.name, body.kind)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        if body.kind == "person":
+            actions.resuggest(conn)
+    else:
+        raise HTTPException(400, "action must be 'facet' or 'leave'")
+    return keywords.unmapped_groups(conn)
+
+
+class RegroupIn(BaseModel):
+    groups: list[str]
+    confirm: bool = False
+
+
+@app.get("/api/regroup/groups")
+def regroup_groups(conn=Conn):
+    """Groups that could hold family-name -> person keywords (`Ashdown|JuliaAshdown`): every top-level
+    group with keywords that isn't a person facet or already `Family`."""
+    out = []
+    for f in keywords.get_facets(conn):
+        n = keywords._facet_keyword_count(conn, f["name"])
+        if n and f["kind"] != "person" and f["name"].lower() != "family":
+            out.append({"name": f["name"], "kind": f["kind"], "keywords": n})
+    return out
+
+
+@app.post("/api/regroup/plan")
+def regroup_plan(body: RegroupIn, conn=Conn):
+    """Preview: what converting these groups to People + Family keywords would do."""
+    return regroup.plan(conn, body.groups)
+
+
+@app.post("/api/regroup/apply")
+def regroup_apply(body: RegroupIn, conn=Conn):
+    """Convert (writes the photo files, with provenance). Needs confirm=true."""
+    if not body.confirm:
+        raise HTTPException(400, "Confirm the preview first")
+    if JOB.state.get("running"):
+        raise HTTPException(409, "An import is running; wait for it to finish")
+    return regroup.apply(conn, body.groups)
 
 
 @app.get("/api/keywords/export")
