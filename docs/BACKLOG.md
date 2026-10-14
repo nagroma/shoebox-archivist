@@ -9,6 +9,11 @@ Open work only. Delete an item when it is done (move it to PLAN.md if it needs a
 - Next: step-by-step migration guide for the owner (backup, preview, convert, `pm strip` to undo), written from the rehearsal on a copy.
 - Restart the app: F5 in VS Code (builds the UI), or `uv run pm serve` after `npm run build` in `frontend`. If `pm` is not found after moving the folder, run `uv sync`.
 
+## Fix first (next session)
+- **File-write errors are swallowed.** `actions.add_photo_keyword` / `remove_photo_keyword` print to stderr and return False; `assign`, `reject`, `ignore` (via `_sync_keywords`), `update_photo` and batch edit don't tell the user a file couldn't be written (read-only, locked, damaged metadata block). Report failures to the UI per photo (which file, why), keep the DB and file consistent, and never claim "Named" when the keyword didn't reach the file. Add tests (read-only file, damaged XMP).
+
+- **Backup before first write.** If a library has no baseline/backup, offer to make one before the first write to the photo files (protects dev experiments; for a real user, a "back up your photos first" prompt). Not built yet.
+
 ## Names and keywords
 - Export aliases to Bridge/Lightroom as keyword synonyms, so searching a married name finds the person. Lightroom's Keywords.txt synonym format needs verifying first.
 - Rename a keyword in the files (record the old one in `sa:OriginalKeywords`, support `pm strip`).
@@ -25,6 +30,7 @@ Open work only. Delete an item when it is done (move it to PLAN.md if it needs a
 - The setup screen only hints that a group looks like people; consider reading the keyword structure from the owner's feedback.
 
 ## Family tree
+- **Rethink `actions.auto_branches`** together with the Family vs. family-name-group (`Ashdown|`, `Marlowe|`, ...) keyword question. Today, once the first branch sync is confirmed, every naming click or keyword edit can add or remove `Family|<Branch>` keywords on that photo without a further prompt. Decide whether branch keywords should exist at all in the owner's structure, and if so, whether they need a visible pending/confirm step. Until decided, don't extend it.
 - Branch keywords: override a branch name (double-barrelled or changed surname); `Family` facet auto-created in new libraries.
 - "How is X related to you?" prompt when a new person is named.
 - Side-of-family and generation keywords written to photos; printing/exporting the tree; collapsing large trees.

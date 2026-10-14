@@ -19,6 +19,7 @@ Must run on Windows and macOS. Plan: see docs/PLAN.md.
 - User settings: `backend/config.py` (`config.load(conn)`), stored as JSON in `settings.config`, shown at `/settings`, API `GET/PUT /api/settings`. A function argument or CLI flag of `None` means "use the setting".
 
 ## Rules
+- `docs/DECISIONS.md` holds the foundations and guardrails (with the reason for each). If a request would break one, stop and ask. When a choice is made because the alternative caused or would cause a problem, add it there with the why.
 - Metadata lives in each photo's XMP (keywords in `lr:hierarchicalSubject`); read and write it with pyexiv2 (`backend/xmp.py`). Keyword conventions: docs/KEYWORD_RULES.md.
 - Bridge and Lightroom are used in parallel with this app (the collection owner manages their photos in Bridge); compatibility with both is a core requirement. Whatever the app writes must read cleanly in Bridge and Lightroom, and edits made there are picked up on the next import.
 - Existing keywords are never lost or silently duplicated. Every hierarchical or flat keyword in a file is kept with its exact path (`Ashdown|JuliaAshdown` stays `Ashdown|JuliaAshdown`, even though Bridge's `[Ashdown]` bracket suggests it shouldn't appear in files). The app does not invent a second keyword (`People|JuliaAshdown`) for something that already exists under another group; changing keyword paths is an explicit remap (file-wide, with provenance), never a side effect. New groups found in photos added later are surfaced for the user to add as a facet or map, not ignored.
