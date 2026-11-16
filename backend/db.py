@@ -225,6 +225,12 @@ MIGRATIONS = [
     # with one person) | match (suggestion from face similarity).
     ("faces", "label_source", "TEXT"),
     ("photos", "date_original", "TEXT"),     # raw date from the file, before rules
+    # 'enhanced' = a scanner's colour-corrected copy of the front (Epson FastFoto '_a').
+    # Preserved for libraries created with the original fixed FastFoto convention.
+    ("images", "variant", "TEXT"),
+    # A partnership that is over (kind 'partner' only), and the year it ended if known.
+    ("relations", "ended", "INTEGER NOT NULL DEFAULT 0"),
+    ("relations", "end_year", "INTEGER"),
 ]
 
 

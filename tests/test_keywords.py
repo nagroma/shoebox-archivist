@@ -20,7 +20,7 @@ def test_parse_vocabulary():
 @pytest.mark.parametrize("raw, shown", [
     ("JohnSmith", "John Smith"), ("JoePBlack", "Joe P Black"),
     ("RobertJonesJr", "Robert Jones Jr"), ("Jimmy Green", "Jimmy Green"),
-    ("Delma", "Delma"),
+    ("Marnie", "Marnie"),
 ])
 def test_display_name(raw, shown):
     assert keywords.display_name(raw) == shown

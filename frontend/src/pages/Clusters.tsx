@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { api, type Candidate, type Candidates, type Cluster, type Face, type FaceReview, type FaceViewPreference, type PersonRef } from '../api'
+import { api, type Candidate, type Candidates, type Cluster, type Face, type FaceReview, type FaceViewPreference, type MatchGroup, type MatchFace, type PersonRef } from '../api'
 import { FaceGrid, FaceThumbnailSizeSlider, PeopleKeywordsCheckbox } from '../components/FaceGrid'
 import { useFaceThumbnailSize } from '../faceThumbnailSize'
 import { PersonPicker } from '../components/PersonPicker'
@@ -14,6 +14,11 @@ export function ClustersPage() {
   const [unclusteredSort, setUnclusteredSort] = useState<FaceSort>('review')
   const [showIgnored, setShowIgnored] = useState(false)
   const [thumbnailSize, setThumbnailSize] = useFaceThumbnailSize()
+
+
+  const [showMatches, setShowMatches] = useState(false)
+  const [matches, setMatches] = useState<MatchGroup[] | null>(null)
+  const [matchError, setMatchError] = useState('')
   const [minSize, setMinSize] = useState<number | null>(null)
   const [busy, setBusy] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -27,6 +32,16 @@ export function ClustersPage() {
     if (id === request.current && result) setReview(result)
     refresh()
   }, [refresh, run])
+
+  useEffect(() => {
+    if (!showMatches || !review) return
+    let active = true
+    setMatches(null)
+    setMatchError('')
+    api.matches().then(groups => { if (active) setMatches(groups) },
+      error => { if (active) setMatchError((error as Error).message) })
+    return () => { active = false }
+  }, [showMatches, review])
 
   useEffect(() => { load() }, [load, stats?.db_token])
   useEffect(() => { api.settings().then(s => setMinSize(m => m ?? s.values.min_cluster_size), () => {}) }, [])
@@ -113,6 +128,18 @@ export function ClustersPage() {
       {saving ? <p className="muted" role="status">Updating displayed scan variants…</p> : <>
       {candidates && candidates.faces.length > 0 && <CandidatesCard key={candidates.faces.map(f => f.id).join(',')} data={candidates} onChanged={load} thumbnailSize={thumbnailSize} />}
 
+      <section className="card">
+        <div className="card-head">
+          <h2>Likely matches</h2>
+          <button onClick={() => { setMatches(null); setShowMatches(s => !s) }}>{showMatches ? 'Hide' : 'Show'}</button>
+        </div>
+        {showMatches && matchError && <p className="hint error">{matchError}</p>}
+        {showMatches && !matches && !matchError && <p className="muted" role="status">Comparing faces…</p>}
+        {showMatches && matches?.length === 0 && <p className="muted">No likely matches in these scan variants.</p>}
+      </section>
+      {showMatches && matches?.map(group => <MatchCard key={`${group.person_id}:${group.faces.map(f => f.id).join(',')}`}
+        group={group} onChanged={load} thumbnailSize={thumbnailSize} showPeopleKeywords={showPeopleKeywords} />)}
+
       {named.length === 0 && !loose && !candidates?.faces.length && <p className="empty">No unnamed faces in these scan variants.</p>}
 
       {named.map(c => <ClusterCard key={`${c.cluster_id}:${c.faces.map(f => f.id).join(',')}`} cluster={c} onChanged={load}
@@ -129,6 +156,64 @@ export function ClustersPage() {
       </section>
       </>}
     </div>
+  )
+}
+
+/** Unnamed faces that look like someone already named, strongest match first. */
+function MatchCard({ group, onChanged, thumbnailSize, showPeopleKeywords }: {
+  group: MatchGroup; onChanged: () => void; thumbnailSize: number; showPeopleKeywords: boolean
+}) {
+  const run = useAction()
+  const [selected, setSelected] = useState<Set<number>>(new Set())
+  const seeds = group.faces.filter(f => f.seed).length
+  const ids = [...selected]
+
+  async function act(fn: () => Promise<unknown>, msg: string) {
+    if (await run(fn, msg)) { setSelected(new Set()); onChanged() }
+  }
+
+  return (
+    <section className="card">
+      <div className="card-head">
+        <h2>
+          {group.guess ? `Is this ${group.name}?` : `Likely ${group.name}`}{' '}
+          <span className="muted">
+            ({group.faces.length} faces{group.guess
+              ? ` · none confirmed yet; the first ${seeds} are guesses from the photo's keywords`
+              : ` · ${group.confirmed} confirmed`})
+          </span>
+        </h2>
+        <div className="row">
+          <button onClick={() => setSelected(new Set(group.faces.map(f => f.id)))}>Select all</button>
+          <button onClick={() => setSelected(new Set())} disabled={selected.size === 0}>Clear</button>
+        </div>
+      </div>
+      {group.guess && (
+        <p className="muted small">
+          Check the guessed faces first. Confirm the ones that really are {group.name}; once one is confirmed the
+          rest are compared with it and this list gets more reliable.
+        </p>
+      )}
+      <FaceGrid faces={group.faces} selected={selected} onSelect={setSelected} showNames={false}
+        size={thumbnailSize} showPeopleKeywords={showPeopleKeywords}
+        badge={f => {
+          const m = f as MatchFace
+          return m.seed
+            ? <span className="likely not_face" title="Guessed from the photo's keywords, not by looks">guess</span>
+            : m.similarity != null ? <span className="likely face" title="Similarity to the named faces">{Math.round(m.similarity * 100)}%</span> : null
+        }} />
+      <div className="action-bar">
+        <span className="scope">{selected.size ? `${selected.size} selected` : 'select faces first'}</span>
+        <button className="primary" disabled={!ids.length}
+          onClick={() => act(() => api.assign(ids, { person_id: group.person_id }), `Named ${ids.length} face(s) ${group.name}`)}>
+          Confirm as {group.name}
+        </button>
+        <button disabled={!ids.length}
+          onClick={() => act(() => api.notPerson(ids, group.person_id), `Not ${group.name}`)}>
+          Not {group.name}
+        </button>
+      </div>
+    </section>
   )
 }
 

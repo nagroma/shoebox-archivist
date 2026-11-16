@@ -74,8 +74,8 @@ def _impossible_people(conn: sqlite3.Connection) -> dict[int, set[int]]:
     return out
 
 
-def label_from_keywords(conn: sqlite3.Connection) -> int:
-    """Confirm the only unmatched face when exactly one tagged person remains.
+def label_from_keywords(conn: sqlite3.Connection, *, confirm: bool = True) -> int:
+    """Name or suggest the only unmatched face when one tagged person remains.
 
     For a group photo, every other eligible face on the scan must have been
     manually confirmed as a different tagged person.
@@ -106,8 +106,10 @@ def label_from_keywords(conn: sqlite3.Connection) -> int:
         if conn.execute("SELECT 1 FROM rejections WHERE face_id = ? AND person_id = ?",
                         (r["face_id"], pid)).fetchone():
             continue
-        conn.execute("UPDATE faces SET person_id = ?, status = 'confirmed', confidence = NULL, "
-                     "label_source = 'keyword' WHERE id = ?", (pid, r["face_id"]))
+        conn.execute("UPDATE faces SET person_id = ?, status = ?, confidence = NULL, "
+                     "label_source = ? WHERE id = ?",
+                     (pid, "confirmed" if confirm else "suggested",
+                      "keyword" if confirm else "elimination", r["face_id"]))
         n += 1
     conn.commit()
     return n
@@ -130,8 +132,7 @@ def suggest(conn: sqlite3.Connection, threshold: float | None = None) -> int:
     keywords.link_flat_people(conn)
     if threshold is None:
         threshold = cfg["suggest_threshold"]
-    if cfg["keyword_autoconfirm"]:
-        label_from_keywords(conn)
+    keyword_count = label_from_keywords(conn, confirm=cfg["keyword_autoconfirm"])
     gallery = Gallery.load(conn)
     rejected: dict[int, set[int]] = defaultdict(set)
     for r in conn.execute("SELECT face_id, person_id FROM rejections"):
@@ -148,7 +149,7 @@ def suggest(conn: sqlite3.Connection, threshold: float | None = None) -> int:
         if policy.image(r['path'], 'identify'):
             by_photo[r["photo_id"]].append(r)
 
-    n = 0
+    n = 0 if cfg["keyword_autoconfirm"] else keyword_count
     for photo_id, faces in by_photo.items():
         named = {x[0] for x in conn.execute(
             "SELECT f.person_id FROM faces f JOIN images i ON i.id = f.image_id "

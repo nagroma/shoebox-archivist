@@ -175,7 +175,20 @@ function FamilyCard({ person, onChanged }: { person: PersonDetail; onChanged: ()
     if (r) { setRel(r); onChanged() }
   }
 
-  const group = (title: string, relation: 'parent' | 'child' | 'partner', list: Relatives['parents'], noun: string) => (
+  async function endPartnership(other: number, ended: boolean) {
+    let year: number | null = null
+    if (ended) {
+      const text = window.prompt('Year the partnership ended (leave blank if unknown)', '')
+      if (text === null) return
+      year = text.trim() ? Number(text) : null
+      if (year !== null && !Number.isInteger(year)) return
+    }
+    const r = await run(() => api.setPartnership(person.id, other, ended, year))
+    if (r) { setRel(r); onChanged() }
+  }
+
+  const group = (title: string, relation: 'parent' | 'child' | 'partner', list: Relatives['parents'], noun: string,
+                 former = false) => (
     <div className="family-group">
       <div className="muted small">{title}</div>
       <div className="row wrap">
@@ -185,11 +198,19 @@ function FamilyCard({ person, onChanged }: { person: PersonDetail; onChanged: ()
               {r.name}
               {r.relation && <span className="person-relationship muted small">{r.relation}</span>}
             </Link>
+            {former && <span className="muted small">{r.end_year ? `Ended ${r.end_year}` : 'Ended'}</span>}
+            {relation === 'partner' && (
+              <button onClick={() => endPartnership(r.id, !former)}>
+                {former ? 'Mark current' : 'Mark ended'}
+              </button>
+            )}
             <button title="Remove link" onClick={() => remove(relation, r.id)}>×</button>
           </span>
         ))}
-        <PersonPicker buttonLabel="Add" placeholder={`Add ${noun}…`} excludeId={person.id} clearOnPick
-          onPick={who => add(relation, who)} />
+        {!former && (
+          <PersonPicker buttonLabel="Add" placeholder={`Add ${noun}…`} excludeId={person.id} clearOnPick
+            onPick={who => add(relation, who)} />
+        )}
       </div>
     </div>
   )
@@ -200,6 +221,7 @@ function FamilyCard({ person, onChanged }: { person: PersonDetail; onChanged: ()
       {!rel.curator && <p className="muted small">Set the curator on the Library page so relatives are labelled from them.</p>}
       {group('Parents', 'parent', rel.parents, 'parent')}
       {group('Partners', 'partner', rel.partners, 'partner')}
+      {rel.former_partners.length > 0 && group('Former partners', 'partner', rel.former_partners, 'partner', true)}
       {group('Children', 'child', rel.children, 'child')}
       {rel.siblings.length > 0 && (
         <div className="family-group">

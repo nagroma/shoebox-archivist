@@ -1,6 +1,6 @@
 # Keyword rules (best guess — to validate with the collection owner)
 
-These rules come from the sample sets (`photos-mt/12_*`, `photos-mt/13_*`) and `photos-mt/Keywords.txt`.
+These rules come from the sample sets (`photos-mt/12_*`, `photos-mt/13_*`); Photo metadata records which keywords apply to each image.
 They are implemented in `backend/keywords.py`. When the collection owner confirms or changes a rule, update this file and the code together.
 
 ## Where metadata lives
@@ -8,14 +8,13 @@ They are implemented in `backend/keywords.py`. When the collection owner confirm
   - `lr:hierarchicalSubject` (`Category|Name`) is the source of truth.
   - `dc:subject` holds a flat copy of the leaf names.
 - The caption is `dc:description`, the date is `photoshop:DateCreated`, and the location is `Iptc4xmpCore:Location`.
-- `Keywords.txt` is the vocabulary exchange file (Bridge/Lightroom export format). It is tab-indented to any depth, and a bracketed group such as `[Smith]` is a container in Bridge.
-  - Import: put `Keywords.txt` in the library folder; it is read on every import.
-  - Export: `/library` → *Export Keywords.txt*, then import it in Bridge or Lightroom.
+- Keywords are authored in Bridge (and possibly Lightroom) alongside this app. A group that is bracketed in Bridge's keyword panel (`[Ashdown]`) is still written into files as `Ashdown|JuliaAshdown`: files are the truth, and these paths are preserved as they are.
+- A root `Keywords.txt` can seed the library vocabulary. Without it, staged libraries learn the vocabulary from folders marked **Learn from this folder**. Export remains available for Bridge and Lightroom.
 
 ## Facets → kind
 Each library has its own list of **facets**: the top-level keyword groups and what each means.
 They are chosen when the library is created (a preset, plus any top-level groups found in the
-photos' existing keywords) and edited at `/library`.
+photos' existing keywords) and edited on the **Keywords** page.
 
 | Kind | Meaning |
 |---|---|
@@ -64,7 +63,8 @@ photos' existing keywords) and edited at `/library`.
 - Is `unknowndate` → "circa year" right, or should it be a decade or a range?
 - Are names that appear in two groups always the same person?
 - Which category should new people go in? (Currently `People`.)
-- Is auto-confirming single-face, single-name photos acceptable?
+- Is confirming single-face, single-name photos in one bulk step acceptable (auto-confirm is off by default)?
+- Does the owner keep `People` for people outside the three families, or move everyone under `People` with `Family|<Name>` for the family (`pm regroup`)?
 - What do primary/secondary, show/hide and question mean in his workflow?
 
 ## Scan families and scan variants

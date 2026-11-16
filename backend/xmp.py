@@ -12,6 +12,7 @@ already present.
 
 Every keyword this app adds is also listed in its own namespace (pm:AddedKeywords),
 so app changes can be told apart from the owner's and stripped again (`pm strip`).
+An owner keyword the app removes (a regroup) is listed in pm:RemovedKeywords and restored by strip.
 Edited fields (caption, date, location) keep their pre-app value in pm:Original*.
 
 Fuzzy dates: photoshop:DateCreated gets the most precise plain date XMP allows
@@ -25,10 +26,12 @@ from pathlib import Path
 import pyexiv2
 import json
 
-# Namespace URI kept from the original project name: it is already written into photos,
-# and changing it would orphan existing pm: provenance (pm strip could no longer undo it).
+# The namespace URI is kept from the original project name (the prefix is only a label): it is
+# already written into photos, and changing it would orphan existing provenance (strip could not undo it).
 PM_NS = "http://photo-manager.local/ns/1.0/"
 HS, SUBJ, ADDED = "Xmp.lr.hierarchicalSubject", "Xmp.dc.subject", "Xmp.pm.AddedKeywords"
+# Owner keywords the app removed on purpose (a regroup); `pm strip` puts them back.
+REMOVED = "Xmp.pm.RemovedKeywords"
 DESC, DATE, EDTF, LOC = ("Xmp.dc.description", "Xmp.photoshop.DateCreated", "Xmp.pm.DateEDTF",
                          "Xmp.iptc.Location")  # Iptc4xmpCore:Location
 # field -> where its value from before the app's first edit is kept
@@ -61,6 +64,7 @@ class XmpInfo:
     keywords: list[str] = field(default_factory=list)   # 'Category|Name'
     flat: list[str] = field(default_factory=list)       # dc:subject
     app_added: list[str] = field(default_factory=list)  # subset of keywords added by us
+    removed: list[str] = field(default_factory=list)    # owner keywords we removed (pm:RemovedKeywords)
     date_created: str | None = None
     date_edtf: str | None = None        # set by this app
     description: str | None = None
@@ -100,6 +104,7 @@ def read(path: Path) -> XmpInfo:
         keywords=_list(x.get(HS)),
         flat=_list(x.get(SUBJ)),
         app_added=_list(x.get(ADDED)),
+        removed=_list(x.get(REMOVED)),
         date_created=x.get(DATE) or None,
         date_edtf=x.get(EDTF) or None,
         description=_lang_alt(x.get(DESC)),
@@ -229,7 +234,7 @@ def _keyword_originals(im) -> None:
 
 def _write(path: Path, hs: list[str], flat: list[str], added: list[str],
            iptc_add: list[str] = (), iptc_remove: set[str] = frozenset(),
-           only_app: bool = True) -> None:
+           only_app: bool = True, removed: list[str] | None = None) -> None:
     with pyexiv2.Image(str(path)) as im:
         if not only_app:
             _keyword_originals(im)
@@ -257,8 +262,11 @@ def _write(path: Path, hs: list[str], flat: list[str], added: list[str],
         if only_app:
             flat += [k for k in old_flat if k not in flat and k not in owned_flat]
         owned_flat = [k for k in owned_flat if k in flat] + [k for k in flat if k not in old_flat]
-        im.modify_xmp({HS: hs or None, SUBJ: list(dict.fromkeys(flat)) or None,
-                       ADDED: added or None, flat_key: list(dict.fromkeys(owned_flat)) or None})
+        updates = {HS: hs or None, SUBJ: list(dict.fromkeys(flat)) or None,
+                   ADDED: added or None, flat_key: list(dict.fromkeys(owned_flat)) or None}
+        if removed is not None:
+            updates[REMOVED] = removed or None
+        im.modify_xmp(updates)
 
 
 def add_keywords(path: Path, keywords: list[str]) -> list[str]:
@@ -282,8 +290,10 @@ def remove_keywords(path: Path, keywords: list[str], only_app_added: bool = True
     hs = [k for k in info.keywords if k not in gone]
     still = {leaf(k) for k in hs}
     flat = [f for f in info.flat if f in still or f not in {leaf(k) for k in gone}]
+    owner = [k for k in gone if k not in info.app_added]   # owner's own: remember to restore
+    removed = info.removed + [k for k in owner if k not in info.removed] if owner else None
     _write(path, hs, flat, [k for k in info.app_added if k not in gone],
-           iptc_remove={leaf(k) for k in gone} - still, only_app=only_app_added)
+           iptc_remove={leaf(k) for k in gone} - still, only_app=only_app_added, removed=removed)
     return gone
 
 
@@ -312,5 +322,13 @@ def remove_flat_keyword(path: Path, name: str) -> None:
 
 
 def strip_app_keywords(path: Path) -> list[str]:
-    """Undo everything this app wrote to the file's keywords."""
-    return remove_keywords(path, read(path).app_added)
+    """Undo everything this app wrote to the file's keywords, and put back owner keywords it removed."""
+    info = read(path)
+    gone = remove_keywords(path, info.app_added)
+    back = [k for k in info.removed if k not in read(path).keywords]
+    if info.removed:
+        cur = read(path)
+        flat = cur.flat + [leaf(k) for k in back if leaf(k) not in cur.flat]
+        _write(path, cur.keywords + back, flat, cur.app_added,
+               iptc_add=[leaf(k) for k in back], removed=[])
+    return gone

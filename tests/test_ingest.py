@@ -30,3 +30,19 @@ def test_is_ignored(rel, ignored):
 def test_classify(name, role, key):
     r, k = classify(Path("album") / name)
     assert r == role and k.endswith("/" + key)
+
+
+def _jpg(path, shade):
+    from PIL import Image
+    Image.new("RGB", (8, 8), (shade, shade, shade)).save(path)
+
+
+def test_fastfoto_corrected_copy_stays_separate_until_a_convention_is_saved(tmp_path):
+    from backend import db, ingest
+
+    for name, shade in [("IMG_1.jpg", 10), ("IMG_1_a.jpg", 20), ("IMG_1_b.jpg", 30)]:
+        _jpg(tmp_path / name, shade)
+    with db.connect(tmp_path / "t.db") as conn:
+        ingest.register_images(conn, tmp_path, tmp_path)
+        rows = {r["path"]: r["photo_id"] for r in conn.execute("SELECT path, photo_id FROM images")}
+        assert rows["IMG_1.jpg"] != rows["IMG_1_a.jpg"]

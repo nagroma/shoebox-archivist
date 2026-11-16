@@ -42,7 +42,8 @@ def test_staged_setup_loads_only_root_vocabulary(tmp_path, monkeypatch):
     monkeypatch.setattr(api, "library_get", lambda: {})
     monkeypatch.setattr(api.JOB, "start", lambda *_: pytest.fail("setup started a scan"))
 
-    inspection = api.library_inspect(api.InspectIn(folder=str(tmp_path), staged=True, preset="blank"))
+    inspection = api.library_inspect(api.InspectIn(folder=str(tmp_path), staged=True, preset="auto"))
+    assert inspection["preset"] == "files"
     assert inspection["keyword_file"] and inspection["facets"][0]["kind"] == "person"
     api.library_create(api.CreateIn(folder=str(tmp_path), staged=True, facets=inspection["facets"]))
     with db.connect(library.data_dir_for(tmp_path) / "library.db") as conn:

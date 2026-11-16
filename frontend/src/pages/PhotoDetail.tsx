@@ -85,7 +85,7 @@ export function PhotoDetailPage() {
 
   if (!photo || !form) return <p className="muted pad">Loading…</p>
 
-  const front = photo.images.find(i => i.is_primary) ?? photo.images.find(i => i.role === 'front') ?? photo.images[0]
+  const front = photo.images[0]
   const back = photo.images.find(i => i.role === 'back')
   const faceImageId = photo.faces.find(f => f.id === activeFace)?.image_id
   const shown = photo.images.find(i => i.id === (versionId ?? faceImageId)) ?? (side === 'back' && back ? back : front)
@@ -139,7 +139,7 @@ export function PhotoDetailPage() {
           {photo.images.length > 1 && <div className="tabs version-tabs" role="group" aria-label="Scan variants">
             {photo.images.map(image => <button key={image.id} className={shown.id === image.id ? 'active' : ''}
               title={image.path} onClick={() => { setVersionId(image.id); setActiveFace(null) }}>
-              {image.variation_label || image.role}{image.recognition_enabled ? ' · Faces' : ''}
+              {image.variation_label || (image.variant === 'enhanced' ? 'Corrected copy' : image.role)}{image.recognition_enabled ? ' · Faces' : ''}
               <small>{image.variation || '(no suffix)'} · {image.path.split('.').pop()}</small>
             </button>)}
           </div>}

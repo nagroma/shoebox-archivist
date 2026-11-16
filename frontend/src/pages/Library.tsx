@@ -92,7 +92,7 @@ function NewLibrary({ info }: { info: LibraryInfo }) {
   const [folder, setFolder] = useState<string | null>(null)
   const [scan, setScan] = useState<ScanState | null>(null)
   const [staged, setStaged] = useState(true)
-  const [preset, setPreset] = useState('family')
+  const [preset, setPreset] = useState('auto')
   const [facets, setFacets] = useState<ProposedFacet[] | null>(null)
   const [useKeywords, setUseKeywords] = useState(true)
   const [curator, setCurator] = useState('')
@@ -104,17 +104,19 @@ function NewLibrary({ info }: { info: LibraryInfo }) {
     const s = await api.inspectStatus(p)
     setScan(s)
     if (s.running) { timer.current = window.setTimeout(() => poll(p), 600); return }
+    if (s.preset) setPreset(s.preset)
     if (s.facets) setFacets(s.facets)
   }, [])
   useEffect(() => () => window.clearTimeout(timer.current), [])
 
   async function choose(path: string) {
-    setError(''); setScan(null); setFacets(null); setFolder(path)
+    setError(''); setScan(null); setFacets(null); setFolder(path); setPreset('auto')
     try {
-      const s = await api.inspectFolder(path, staged, preset)
+      const s = await api.inspectFolder(path, staged, 'auto')
       setScan(s)
+      if (s.preset) setPreset(s.preset)
       if (s.facets) setFacets(s.facets)
-      else if (!s.existing) void poll(preset).catch(e => setError((e as Error).message))
+      else if (!s.existing) void poll('auto').catch(e => setError((e as Error).message))
     } catch (e) { setError((e as Error).message); setFolder(null) }
   }
 
@@ -225,7 +227,7 @@ function NewLibrary({ info }: { info: LibraryInfo }) {
               </div>
 
               <table className="facets">
-                <thead><tr><th>Top-level keyword group (facet)</th><th>Kind</th><th>{staged ? "In Keywords.txt" : "In photos"}</th><th /></tr></thead>
+                <thead><tr><th>Top-level keyword group (facet)</th><th>Kind</th><th>Examples</th><th>{staged ? "In Keywords.txt" : "In photos"}</th><th /></tr></thead>
                 <tbody>
                   {facets.map((f, i) => (
                     <tr key={i}>
@@ -235,7 +237,15 @@ function NewLibrary({ info }: { info: LibraryInfo }) {
                           {info.kinds.map(k => <option key={k} value={k}>{k} – {KIND_HELP[k] ?? ''}</option>)}
                         </select>
                       </td>
-                      <td className="muted">{f.found || ''}</td>
+                      <td className="muted small">
+                        {f.samples?.join(', ')}
+                        {f.looks_like_people && f.kind !== 'person' && (
+                          <div>Looks like names of people.{' '}
+                            <button className="ghost" onClick={() => setFacet(i, { kind: 'person' })}>Use as people</button>
+                          </div>
+                        )}
+                      </td>
+                      <td className="muted">{f.found || ''}{f.from_files && ' (from files)'}</td>
                       <td><button className="ghost" title="Remove"
                         onClick={() => setFacets(facets.filter((_, j) => j !== i))}>×</button></td>
                     </tr>
@@ -283,6 +293,7 @@ function NewLibrary({ info }: { info: LibraryInfo }) {
   )
 }
 
+/** Facets, Keywords.txt export and reset for the open library. */
 function CurrentLibrary({ info, reload }: { info: LibraryInfo; reload: () => void }) {
   const [curator, setCurator] = useState(info.curator?.name ?? '')
   const [msg, setMsg] = useState('')

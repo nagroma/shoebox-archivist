@@ -143,7 +143,7 @@ textarea { width: 100%; resize: vertical; }
 .photo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
 .photo-card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; color: var(--text); }
 .photo-card:hover { border-color: var(--accent); }
-.photo-card img { width: 100%; aspect-ratio: 4/3; object-fit: cover; display: block; background: var(--hover); }
+.photo-card img { width: 100%; aspect-ratio: 4/3; object-fit: contain; display: block; background: var(--hover); }
 .photo-card .meta { display: flex; justify-content: space-between; padding: 6px 8px; font-size: 12px; }
 .badge { background: var(--warn); color: #fff; border-radius: 8px; padding: 0 6px; }
 .badge.done { background: var(--ok); }
@@ -313,6 +313,7 @@ button.danger:disabled { opacity: .5; }
 .tree svg { position: absolute; left: 0; top: 0; pointer-events: none; }
 .tree-parent { fill: none; stroke: var(--muted, #888); stroke-width: 1.5; }
 .tree-partner { stroke: var(--accent, #c0392b); stroke-width: 2; }
+.tree-partner.ended { stroke-dasharray: 4 4; opacity: .6; }
 .tree-node { position: absolute; box-sizing: border-box; display: flex; flex-direction: column; align-items: center;
   padding: 6px 4px; border: 1px solid var(--border, #ddd); border-radius: 8px; background: var(--card, #fff);
   text-decoration: none; color: inherit; overflow: hidden; }

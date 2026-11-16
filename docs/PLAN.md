@@ -26,7 +26,7 @@ Goal of this pass: a **prototype that proves viability** before presenting it to
 | Storage | SQLite (+ embeddings as BLOBs, brute-force cosine in NumPy) | At about 30k faces, search takes milliseconds. No vector DB needed. |
 | Backend | FastAPI | Simple; serves the API and the UI on localhost |
 | UI | React + TypeScript (Vite) in the browser | Rich tagging UI; same on both OSes |
-| Metadata I/O | **ExifTool** (via PyExifTool) | Cross-platform; writes MWG face regions, keywords, and custom XMP |
+| Metadata I/O | **pyexiv2** (`backend/xmp.py`); originally planned as ExifTool via PyExifTool | Current choice. See docs/DECISIONS.md; the reason for the switch is not recorded. |
 
 Licensing note: InsightFace pretrained weights are licensed for **non-commercial use only**. That's fine for personal family use. If this ever becomes a product, swap in a permissively licensed model.
 
@@ -44,7 +44,7 @@ Licensing note: InsightFace pretrained weights are licensed for **non-commercial
 5. **Lightroom interop.**
    - Names are written as MWG face regions plus person keywords, which Lightroom reads.
    - The fuzzy date goes in a custom XMP namespace. A best-guess `DateTimeOriginal` is written only if the user opts in.
-   - Write XMP sidecars or a copy first. **Never modify originals in the prototype.**
+   - ~~Never modify originals in the prototype.~~ Superseded (see docs/DECISIONS.md): the app writes XMP into the photo files, only on the user's explicit action, with provenance and `pm strip` as undo. Development uses a copy plus `pm baseline restore`.
 6. **Tagging UX speed.** The main productivity win is **bulk confirm**: "these 40 faces are probably Grandma Ruth — uncheck the wrong ones." Tagging one photo at a time is the fallback.
 7. **Cross-platform build.**
    - ONNX Runtime ships as a different package per OS (`onnxruntime-gpu` on Windows, `onnxruntime` on Mac). Handle it with `uv` platform markers.

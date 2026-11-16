@@ -1,0 +1,39 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Shoebox Archivist (build UI + serve)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "backend.cli",
+      "args": ["serve"],
+      "cwd": "${workspaceFolder}",
+      "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "preLaunchTask": "Build frontend"
+    },
+    {
+      "name": "Shoebox Archivist (serve only, no UI build)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "backend.cli",
+      "args": ["serve"],
+      "cwd": "${workspaceFolder}",
+      "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "Shoebox Archivist (API only, for npm run dev)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "backend.cli",
+      "args": ["serve", "--no-browser"],
+      "cwd": "${workspaceFolder}",
+      "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    }
+  ]
+}
