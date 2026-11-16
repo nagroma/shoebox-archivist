@@ -162,13 +162,15 @@ def parse_vocabulary(text: str) -> list[tuple[str, str]]:
     return out
 
 
-def export_vocabulary(conn: sqlite3.Connection) -> str:
+def export_vocabulary(conn: sqlite3.Connection, ids: set[int] | None = None) -> str:
     """The library's keywords as a Keywords.txt (tab-indented), for import into Bridge or
     Lightroom. Facets are listed even when empty."""
     tree: dict = {}
     for f in get_facets(conn):
         tree.setdefault(f["name"], {})
-    for r in conn.execute("SELECT category, name FROM keywords ORDER BY category, name"):
+    for r in conn.execute("SELECT id, category, name FROM keywords ORDER BY category, name"):
+        if ids is not None and r["id"] not in ids:
+            continue
         node = tree
         for part in [*r["category"].split("|"), r["name"]]:
             node = node.setdefault(part.strip("[]"), {})
@@ -229,12 +231,35 @@ def resolve(conn: sqlite3.Connection, keyword: str) -> int:
     category, name = split(keyword)
     if category is None:
         row = conn.execute("SELECT id FROM keywords WHERE lower(replace(name, ' ', '')) = ? "
-                           "ORDER BY in_vocab DESC, id",
+                           "ORDER BY person_id IS NOT NULL DESC, in_vocab DESC, id",
                            (name.replace(" ", "").lower(),)).fetchone()
         if row:
             return row["id"]
         category = OTHER_CATEGORY
     return ensure(conn, category, name)
+
+
+def link_flat_people(conn: sqlite3.Connection) -> int:
+    """Recognize previously imported flat names once the library knows the person.
+
+    Keep the keyword and its photo links, including their original provenance.
+    This also repairs libraries where a flat name was read before its grouped
+    counterpart. No photo files are changed.
+    """
+    rows = conn.execute("SELECT id, name FROM keywords WHERE category = ? "
+                        "AND kind = 'other' AND person_id IS NULL", (OTHER_CATEGORY,)).fetchall()
+    n = 0
+    for row in rows:
+        normalized = row["name"].replace(" ", "").lower()
+        person = conn.execute(
+            "SELECT person_id FROM keywords WHERE person_id IS NOT NULL "
+            "AND lower(replace(name, ' ', '')) = ? ORDER BY in_vocab DESC, id",
+            (normalized,)).fetchone()
+        if person:
+            conn.execute("UPDATE keywords SET kind = 'person', person_id = ? WHERE id = ?",
+                         (person["person_id"], row["id"]))
+            n += 1
+    return n
 
 
 def load_vocabulary(conn: sqlite3.Connection, path: Path) -> int:
@@ -255,14 +280,54 @@ def path_of(conn: sqlite3.Connection, keyword_id: int) -> str:
 
 def person_keyword(conn: sqlite3.Connection, person_id: int) -> int:
     """The keyword written to files for a person; created if they don't have one."""
-    row = conn.execute("SELECT id FROM keywords WHERE person_id = ? ORDER BY in_vocab DESC, id",
-                       (person_id,)).fetchone()
+    row = conn.execute("SELECT id FROM keywords WHERE person_id = ? "
+                       "ORDER BY category = ?, in_vocab DESC, id",
+                       (person_id, OTHER_CATEGORY)).fetchone()
     if row:
         return row["id"]
     name = conn.execute("SELECT name FROM people WHERE id = ?", (person_id,)).fetchone()["name"]
     return conn.execute(
         "INSERT INTO keywords(category, name, kind, person_id) VALUES (?, ?, 'person', ?)",
         (default_person_category(conn), keyword_name(name), person_id)).lastrowid
+
+
+def person_keywords(conn: sqlite3.Connection, person_id: int) -> list[int]:
+    """Explicit choices, or the legacy single keyword when none have been selected."""
+    chosen = [r[0] for r in conn.execute(
+        "SELECT c.keyword_id FROM person_keyword_choices c JOIN keywords k ON k.id = c.keyword_id "
+        "WHERE c.person_id = ? AND k.person_id = ? ORDER BY c.keyword_id", (person_id, person_id))]
+    return chosen or [person_keyword(conn, person_id)]
+
+
+def set_person_keywords(conn: sqlite3.Connection, person_id: int, keyword_ids: list[int]) -> None:
+    ids = list(dict.fromkeys(keyword_ids))
+    if not ids:
+        raise ValueError("Select at least one keyword")
+    owned = {r[0] for r in conn.execute("SELECT id FROM keywords WHERE person_id = ?", (person_id,))}
+    if not set(ids) <= owned:
+        raise ValueError("Select only keywords belonging to this person")
+    conn.execute("DELETE FROM person_keyword_choices WHERE person_id = ?", (person_id,))
+    conn.executemany("INSERT INTO person_keyword_choices(person_id, keyword_id) VALUES (?, ?)",
+                     [(person_id, kid) for kid in ids])
+
+
+def attach_person_keyword(conn: sqlite3.Connection, person_id: int, category: str, name: str) -> int:
+    """Use an exact, reviewed spelling; never silently take another person's keyword."""
+    parts = category.split("|")
+    if any(not p.strip() or p != p.strip() or '[' in p or ']' in p for p in parts):
+        raise ValueError("Enter a parent path with non-empty groups separated by |")
+    if kind_of(category, conn) != "person":
+        raise ValueError("Choose a person group from Keywords first")
+    if not name or name != name.strip() or any(c in name for c in "|[]\n\r\t"):
+        raise ValueError("Enter a keyword name without hierarchy separators or brackets")
+    row = conn.execute("SELECT id, person_id FROM keywords WHERE category = ? AND name = ?",
+                       (category, name)).fetchone()
+    if row:
+        if row["person_id"] != person_id:
+            raise ValueError("That keyword already exists; choose its existing person instead")
+        return row["id"]
+    return conn.execute("INSERT INTO keywords(category, name, kind, person_id, in_vocab) VALUES (?, ?, 'person', ?, 1)",
+                        (category, name, person_id)).lastrowid
 
 
 def photo_people(conn: sqlite3.Connection, photo_id: int) -> set[int]:

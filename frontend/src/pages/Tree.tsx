@@ -188,8 +188,8 @@ export function TreePage() {
                 style={{ left: n.x, top: n.y, width: NODE_W, height: NODE_H }}>
                 {n.cover ? <img src={faceThumb(n.cover)} alt="" /> : <div className="noface">?</div>}
                 <div className="name">{n.name}</div>
-                <div className="muted small">
-                  {n.relation && n.relation !== 'You' ? n.relation : n.relation === 'You' ? 'You' : ''}
+                <div className="person-relationship muted small">
+                  {n.relation}
                   {(n.birth_year || n.death_year) && ` ${n.birth_year ?? '?'}–${n.death_year ?? ''}`}
                 </div>
               </Link>

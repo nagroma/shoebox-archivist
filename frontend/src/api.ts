@@ -14,6 +14,7 @@ export interface Face {
   cluster_id: number | null
   /** user | keyword (only face in a photo keyworded with one person) | keyword_match | elimination | match */
   label_source: string | null
+  people_keywords?: string[]
 }
 
 export interface Candidate extends Face {
@@ -54,6 +55,7 @@ export interface Cluster {
 export interface Alias { name: string; kind: string; from_year: number | null }
 
 export interface PersonSummary {
+  keyword_paths: string[]
   aliases: Alias[]
   /** the name in use now (latest 'used from' year) */
   display_name: string
@@ -74,6 +76,7 @@ export interface PersonSummary {
 }
 
 export interface PersonDetail {
+  keyword_ids: number[]
   aliases: Alias[]
   display_name: string
   name_from_year: number | null
@@ -138,7 +141,46 @@ export interface PhotoSummary {
   named: number
 }
 
+export interface KeywordScope { mode: 'all' | 'fronts' | 'backs' | 'current' | 'ask' | 'selected' | 'one'; suffixes: string[] }
+export interface VariationType { suffix: string; label: string; role: 'front' | 'back' | 'other' }
+export interface FaceViewPreference { preferred: string | null; also_show: string[] }
+export interface FaceReview {
+  view: FaceViewPreference & { effective: string; default_preferred: string; front_types: VariationType[];
+    available: (VariationType & { files: number })[]; fallback: number; unscanned: number }
+  clusters: Cluster[]; candidates: Candidates; ignored: Face[]
+}
+export interface VariationConfig {
+  enabled: boolean; pattern: 'suffix' | 'serial'; preferred: string; recognition: string
+  types: VariationType[]; overrides?: Record<number, string>
+}
+export interface SharingRule { target: 'hierarchy' | 'keyword'; path: string; scope: KeywordScope }
+export interface SharingSettings { rules: SharingRule[] }
+export interface GroupPreview {
+  token: string; files: number; config: VariationConfig
+  groups: { key: string; primary_id: number; recognition_id: number | null; issues: string[]; metadata_conflicts: string[]
+    members: { id: number; path: string; label: string; suffix: string; role: string; photo_id: number }[] }[]
+}
+export interface KeywordDifference {
+  id: string; photo_id: number; image_id: number; keyword_id: number; keyword: string; path: string
+  reason?: string; variation: string; source: 'file' | 'app' | null; inherited: string; present: boolean; expected: boolean; action: 'add' | 'remove'
+}
+export interface ExclusiveConflict {
+  id: string; photo_id: number; keyword_id: number; keyword: string; blocked: boolean
+  variants: { image_id: number; path: string; variation: string; present: boolean; exception: boolean }[]
+}
+export interface KeywordReview {
+  photos_checked?: number
+  conflicts: ExclusiveConflict[]
+  grouping_issues: { image_id: number; path: string; suffix: string; issue: string }[]
+  differences: KeywordDifference[]; exceptions: KeywordDifference[]
+  choices: { photo_id: number; keyword_id: number; keyword: string; path: string }[]
+  errors: { image_id: number; path: string; error: string }[]
+}
+
 export interface ImageInfo {
+  variation: string; variation_label: string; is_primary: number; recognition_enabled: number
+  keyword_sources: Record<number, 'file' | 'app'>
+  keyword_ids: number[]; exceptions: { keyword_id: number; present: number }[]
   id: number
   role: 'front' | 'back' | 'other'
   path: string
@@ -148,6 +190,7 @@ export interface ImageInfo {
 }
 
 export interface PhotoDetail {
+  keyword_scopes: Record<string, { scope: KeywordScope; inherited: string; library_mode: KeywordScope['mode'] }>
   id: number
   date_text: string | null
   date: ParsedDate | null
@@ -198,15 +241,28 @@ export const displayName = (name: string) =>
 
 export interface IngestState {
   running: boolean
+  rescan_folder?: string
   stage?: string
   done?: number
   total?: number
   error?: string | null
   result?: { added: number; duplicates: number; dated: number; scanned: number; faces: number;
-             suggestions: number; clusters: number } | null
+             suggestions: number; clusters: number; keyword_differences?: number; keyword_choices?: number; keyword_errors?: number; variation_issues?: number } | null
+}
+
+export function scanProgressText({ stage = 'Scanning', done = 0, total }: IngestState) {
+  if (!total) return `${stage}…`
+  if (stage === 'Finding faces') return `Finding faces in ${done} of ${total} ${total === 1 ? 'photo' : 'photos'}`
+  return `${stage} · ${done} / ${total}`
+}
+
+export function faceRescanSummary(folder: string, { scanned, faces }: NonNullable<IngestState['result']>) {
+  return `Face re-scan complete for ${folder}. Checked ${scanned} ${scanned === 1 ? 'photo' : 'photos'} and found ${faces} new ${faces === 1 ? 'face' : 'faces'}.`
 }
 
 export interface Stats {
+  can_show_in_finder?: boolean
+  keyword_differences: number
   library_root: string | null
   db_token: string | null
   candidates: number
@@ -229,6 +285,7 @@ export interface LibraryInfo {
   data_dir?: string | null
   /** data lives in <photo folder>/.shoebox, so the library can be reset */
   managed?: boolean
+  folder_scoped?: boolean
   facets?: (Facet & { keywords: number })[]
   /** the person the library is organised around */
   curator?: { id: number; name: string } | null
@@ -241,9 +298,30 @@ export interface FolderListing {
   images: number
   has_library: boolean
   home: string
+  icloud?: string
+}
+
+export type FolderFlag = 'learn' | 'identify'
+
+export interface FolderEntry {
+  path: string
+  name: string
+  learn: boolean
+  identify: boolean
+  indexed: number
+  fronts: number
+  scanned: number
+}
+
+export interface FolderTree {
+  folders: FolderEntry[]
+  keyword_file: boolean
+  scoped: boolean
 }
 
 export interface ScanState {
+  staged?: boolean
+  keyword_file?: boolean
   running: boolean
   existing?: boolean
   folder?: string
@@ -283,13 +361,36 @@ export type PersonRef = { person_id: number } | { name: string }
 
 export const api = {
   stats: () => get<Stats>('/api/stats'),
-  clusters: () => get<Cluster[]>('/api/clusters'),
+  facesReview: () => get<FaceReview>('/api/faces/review'),
+  saveFacesView: (preference: FaceViewPreference) => req<FaceReview>('PUT', '/api/faces/review', preference),
   recluster: (min_size?: number) => post<{ clusters: number; suggestions: number }>('/api/recluster', { min_size }),
 
+  variations: () => get<VariationConfig>('/api/variations'),
+  pauseVariations: () => post<VariationConfig>('/api/variations/pause', {}),
+  previewVariations: (config: VariationConfig, overrides: Record<number, string>) =>
+    post<GroupPreview>('/api/variations/preview', { config, overrides }),
+  applyVariations: (config: VariationConfig, token: string, overrides: Record<number, string>) =>
+    post<{ groups: number; files: number; backup: string }>('/api/variations/apply', { config, token, overrides }),
+  sharing: () => get<SharingSettings>('/api/sharing'),
+  saveSharing: ({ rules }: SharingSettings) =>
+    req<SharingSettings>('PUT', '/api/sharing', { rules, check_on_save: false }), // Older servers still accept this option.
+  keywordReview: (photo_id?: number) => get<KeywordReview>('/api/sharing/review' + (photo_id ? `?photo_id=${photo_id}` : '')),
+  keepKeywordOnOneVariant: (conflict_id: string, keep_image_id: number) =>
+    post<KeywordReview>('/api/sharing/keep-one', { conflict_id, keep_image_id, confirm_removals: true }),
+  applyKeywordReview: (selections: { id: string; allow_owner_removal?: boolean }[]) =>
+    post<{ completed: string[]; errors: { id: string; error: string }[]; review: KeywordReview }>('/api/sharing/apply', { selections }),
+  photoKeywordScope: (pid: number, kid: number, scope: KeywordScope | null) =>
+    req<KeywordReview>('PUT', `/api/photos/${pid}/keywords/${kid}/scope`, { scope }),
+  keywordException: (image: number, kid: number, present: boolean | null) =>
+    req<KeywordReview>('PUT', `/api/images/${image}/keywords/${kid}/exception`, { present }),
   assign: (face_ids: number[], who: PersonRef) =>
     post<{ person_id: number }>('/api/faces/assign', { face_ids, ...who }),
+  acceptGuesses: (guesses: { face_id: number; person_id: number }[]) =>
+    post<{ accepted: number }>('/api/faces/accept-guesses', { guesses }),
   reject: (face_ids: number[]) => post('/api/faces/reject', { face_ids }),
   ignore: (face_ids: number[]) => post('/api/faces/ignore', { face_ids }),
+  repairFace: (faceId: number, rotate: boolean) =>
+    post<{ face_id: number; revision: string }>(`/api/faces/${faceId}/repair`, { rotate }),
   unignore: (face_ids: number[]) => post('/api/faces/unignore', { face_ids }),
   removeFromCluster: (face_ids: number[]) => post('/api/faces/remove-from-cluster', { face_ids }),
   ignored: () => get<Face[]>('/api/faces/ignored'),
@@ -300,7 +401,10 @@ export const api = {
 
   people: () => get<PersonSummary[]>('/api/people'),
   person: (id: number) => get<PersonDetail>(`/api/people/${id}`),
-  createPerson: (name: string) => post<PersonDetail>('/api/people', { name }),
+  createPerson: (name: string, keyword_category?: string, keyword_name?: string) =>
+    post<PersonDetail>('/api/people', { name, keyword_category, keyword_name }),
+  savePersonKeywords: (id: number, keyword_ids: number[], category?: string, name?: string) =>
+    req<PersonDetail>('PUT', `/api/people/${id}/keywords`, { keyword_ids, category, name }),
   updatePerson: (id: number, fields: Partial<PersonDetail>) =>
     req<PersonDetail>('PATCH', `/api/people/${id}`, fields),
   saveAliases: (id: number, aliases: Alias[]) => req<Alias[]>('PUT', `/api/people/${id}/aliases`, aliases),
@@ -329,12 +433,14 @@ export const api = {
     return get<PhotoSummary[]>(`/api/photos?${qs}`)
   },
   photo: (id: number) => get<PhotoDetail>(`/api/photos/${id}`),
-  fileMetadata: (id: number) => get<{ warning: string | null; tags: Record<string, Record<string, unknown>>
-                                      app: Record<string, 'app' | 'changed' | 'managed'> }>(`/api/photos/${id}/file-metadata`),
+  refreshPreview: (imageId: number) => post<{ revision: string }>(`/api/images/${imageId}/refresh-preview`),
+  showInFinder: (imageId: number) => post<{ ok: boolean }>(`/api/images/${imageId}/show-in-finder`),
+  fileMetadata: (id: number, image_id?: number) => get<{ warning: string | null; tags: Record<string, Record<string, unknown>>
+                                      app: Record<string, 'app' | 'changed' | 'managed'> }>(`/api/photos/${id}/file-metadata${image_id ? `?image_id=${image_id}` : ''}`),
   updatePhoto: (id: number, fields: Partial<Pick<PhotoDetail, 'date_text' | 'location' | 'caption' | 'back_text' | 'notes'>>) =>
     req<PhotoDetail>('PATCH', `/api/photos/${id}`, fields),
-  keywords: () => get<Keyword[]>('/api/keywords'),
-  addKeyword: (photoId: number, kw: { keyword_id: number } | { category: string; name: string }) =>
+  keywords: (vocabularyOnly = false) => get<Keyword[]>(`/api/keywords?vocabulary_only=${vocabularyOnly}`),
+  addKeyword: (photoId: number, kw: ({ keyword_id: number } | { category: string; name: string }) & { image_id?: number; scope?: KeywordScope }) =>
     post<PhotoKeyword[]>(`/api/photos/${photoId}/keywords`, kw),
   removeKeyword: (photoId: number, keywordId: number) =>
     req<PhotoKeyword[]>('DELETE', `/api/photos/${photoId}/keywords/${keywordId}`),
@@ -345,6 +451,7 @@ export const api = {
                       add_keyword_ids?: number[]; remove_keyword_ids?: number[] }) =>
     post<{ photos: number; keywords_added: number; keywords_removed: number }>('/api/photos/batch-edit', body),
   ingest: () => post<IngestState>('/api/ingest'),
+  rescanFolderFaces: (path: string) => post<IngestState>('/api/folders/rescan-faces', { path }),
   ingestStatus: () => get<IngestState>('/api/ingest/status'),
   upload: async (files: File[]) => {
     const fd = new FormData()
@@ -355,10 +462,13 @@ export const api = {
   },
   library: () => get<LibraryInfo>('/api/library'),
   listFolder: (path = '') => get<FolderListing>(`/api/fs/list?path=${encodeURIComponent(path)}`),
-  inspectFolder: (folder: string) => post<ScanState>('/api/library/inspect', { folder }),
+  inspectFolder: (folder: string, staged: boolean, preset: string) => post<ScanState>('/api/library/inspect', { folder, staged, preset }),
+  folders: () => get<FolderTree>('/api/folders'),
+  chooseFolder: (path: string, flag: FolderFlag, enabled: boolean) =>
+    req<FolderTree>('PUT', '/api/folders', { path, flag, enabled }),
   inspectStatus: (preset: string) => get<ScanState>(`/api/library/inspect/status?preset=${preset}`),
-  createLibrary: (folder: string, facets: Facet[], import_keywords: boolean, curator = '') =>
-    post<LibraryInfo>('/api/library/create', { folder, facets, import_keywords, curator }),
+  createLibrary: (folder: string, facets: Facet[], import_keywords: boolean, curator = '', staged = false) =>
+    post<LibraryInfo>('/api/library/create', { folder, facets, import_keywords, curator, staged }),
   setCurator: (name: string) => req<{ id: number; name: string } | null>('PUT', '/api/library/curator', { name }),
   openLibrary: (folder: string) => post<LibraryInfo>('/api/library/open', { folder }),
   closeLibrary: () => post<LibraryInfo>('/api/library/close'),
@@ -371,7 +481,12 @@ export const api = {
 /** Per-database token in image URLs: ids restart after a DB reset, so without it the
  *  browser would keep showing cached pictures from the previous library. */
 let cacheKey = ''
-export const setCacheKey = (k: string | null | undefined) => { cacheKey = k ?? '' }
-export const faceThumb = (id: number) => `/api/faces/${id}/thumb?v=${cacheKey}`
-export const imageUrl = (id: number, size: 'thumb' | 'large' = 'large') =>
-  `/api/images/${id}?size=${size}&v=${cacheKey}`
+const faceThumbRevisions = new Map<number, string>()
+export const setCacheKey = (k: string | null | undefined) => {
+  if (cacheKey !== (k ?? '')) faceThumbRevisions.clear()
+  cacheKey = k ?? ''
+}
+export const setFaceThumbRevision = (id: number, revision: string) => { faceThumbRevisions.set(id, revision) }
+export const faceThumb = (id: number) => `/api/faces/${id}/thumb?v=${cacheKey}&preview=${faceThumbRevisions.get(id) ?? '2'}`
+export const imageUrl = (id: number, size: 'thumb' | 'large' = 'large', revision = '2') =>
+  `/api/images/${id}?size=${size}&v=${cacheKey}&preview=${revision}`

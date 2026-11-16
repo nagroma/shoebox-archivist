@@ -107,6 +107,14 @@ CREATE TABLE IF NOT EXISTS keywords (
 );
 CREATE INDEX IF NOT EXISTS idx_keywords_person ON keywords(person_id);
 
+-- Explicit keyword choices for future face confirmations (not a rewrite of old photos).
+CREATE TABLE IF NOT EXISTS person_keyword_choices (
+    person_id INTEGER NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+    keyword_id INTEGER NOT NULL REFERENCES keywords(id) ON DELETE CASCADE,
+    PRIMARY KEY (person_id, keyword_id)
+);
+
+
 -- Keywords on a photo. source: 'file' = already in the file when ingested (the owner's),
 -- 'app' = written to the file by this app (also listed in the file's pm:AddedKeywords).
 CREATE TABLE IF NOT EXISTS photo_keywords (
@@ -117,6 +125,40 @@ CREATE TABLE IF NOT EXISTS photo_keywords (
 );
 CREATE INDEX IF NOT EXISTS idx_photo_keywords_kw ON photo_keywords(keyword_id);
 
+
+-- Actual keywords on each physical file; photo_keywords remains the searchable union.
+CREATE TABLE IF NOT EXISTS image_keywords (
+    image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+    keyword_id INTEGER NOT NULL REFERENCES keywords(id) ON DELETE CASCADE,
+    source TEXT NOT NULL CHECK(source IN ('file', 'app')),
+    PRIMARY KEY(image_id, keyword_id)
+);
+CREATE TABLE IF NOT EXISTS image_keyword_exceptions (
+    image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+    keyword_id INTEGER NOT NULL REFERENCES keywords(id) ON DELETE CASCADE,
+    present INTEGER NOT NULL CHECK(present IN (0, 1)),
+    PRIMARY KEY(image_id, keyword_id)
+);
+CREATE TABLE IF NOT EXISTS photo_keyword_scopes (
+    anchor_image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+    keyword_id INTEGER NOT NULL REFERENCES keywords(id) ON DELETE CASCADE,
+    scope TEXT NOT NULL,
+    PRIMARY KEY(anchor_image_id, keyword_id)
+);
+CREATE TABLE IF NOT EXISTS photo_keyword_intents (
+    photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+    keyword_id INTEGER NOT NULL REFERENCES keywords(id) ON DELETE CASCADE,
+    PRIMARY KEY(photo_id, keyword_id)
+);
+-- Original app metadata retained when groups merge/split. No file is renamed.
+CREATE TABLE IF NOT EXISTS image_photo_history (
+    image_id INTEGER PRIMARY KEY REFERENCES images(id) ON DELETE CASCADE,
+    metadata TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS image_group_overrides (
+    image_id INTEGER PRIMARY KEY REFERENCES images(id) ON DELETE CASCADE,
+    group_key TEXT NOT NULL
+);
 -- Suggestions from back OCR, Lightroom keywords, etc. awaiting review.
 CREATE TABLE IF NOT EXISTS suggestions (
     id       INTEGER PRIMARY KEY,
@@ -158,6 +200,13 @@ def connect(db_path: Path) -> sqlite3.Connection:
 
 # Columns added after the first schema version: (table, column, type).
 MIGRATIONS = [
+    ("images", "variation", "TEXT NOT NULL DEFAULT ''"),
+    ("images", "variation_label", "TEXT NOT NULL DEFAULT ''"),
+    ("images", "is_primary", "INTEGER NOT NULL DEFAULT 0"),
+    ("images", "recognition_enabled", "INTEGER NOT NULL DEFAULT 1"),
+    ("images", "keywords_indexed", "INTEGER NOT NULL DEFAULT 0"),
+    ("images", "keyword_stamp", "TEXT"),
+    ("image_keywords", "hierarchical", "INTEGER NOT NULL DEFAULT 0"),
     # 1 = found only by a thorough-scan extra pass (rotated / enlarged / contrast); often
     # not a face at all. Kept out of clustering and matching until someone says it is.
     ("faces", "candidate", "INTEGER NOT NULL DEFAULT 0"),
@@ -212,8 +261,20 @@ def get_or_create_person(conn: sqlite3.Connection, name: str) -> int:
     row = conn.execute("SELECT id FROM people WHERE name = ?", (name,)).fetchone()
     if row:
         return row["id"]
-    alias = conn.execute("SELECT person_id FROM person_names WHERE lower(name) = lower(?)",
-                         (name,)).fetchone()
+    # The naming interface accepts both a displayed name and the existing file
+    # keyword ("Ann Smith" / "AnnSmith"). Both must resolve to the same person.
+    normalized = name.replace(" ", "").lower()
+    keyword = conn.execute("SELECT person_id FROM keywords WHERE person_id IS NOT NULL "
+                           "AND lower(replace(name, ' ', '')) = ? ORDER BY in_vocab DESC, id",
+                           (normalized,)).fetchone()
+    if keyword:
+        return keyword["person_id"]
+    row = conn.execute("SELECT id FROM people WHERE lower(replace(name, ' ', '')) = ?",
+                       (normalized,)).fetchone()
+    if row:
+        return row["id"]
+    alias = conn.execute("SELECT person_id FROM person_names "
+                         "WHERE lower(replace(name, ' ', '')) = ?", (normalized,)).fetchone()
     if alias:  # typing a married name finds the person, it doesn't create a new one
         return alias["person_id"]
     return conn.execute("INSERT INTO people(name) VALUES(?)", (name,)).lastrowid

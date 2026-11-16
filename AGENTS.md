@@ -28,7 +28,7 @@ Must run on Windows and macOS. Plan: see docs/PLAN.md.
   - `pm strip` undoes app edits; `pm baseline save/restore` snapshots the library for dev testing.
 - Never touch a Lightroom catalog.
 - Store paths relative to the library root with `/` separators.
-- Face naming is suggest-then-confirm. The only exception: a photo with exactly one person keyword and one detected face is auto-confirmed (`label_source='keyword'`).
+- Face naming is suggest-then-confirm. With **Name from keywords** enabled, auto-confirm (`label_source='keyword'`) is allowed when one eligible face and one tagged person are unmatched and every other eligible face on the same scan was manually confirmed as a different tagged person. This includes the single-face, single-person case. Respect previous rejections.
 - Name changes: the keyword in the files stays under the person's primary (birth) name. Other names live in `person_names` (kind, `from_year`); photos dated from that year show the alias (`person_name` in `api.FACE_SQL`), and typing an alias resolves to the same person. Edit at `/people/<id>` ("Other names"), API `PUT /api/people/{id}/aliases`.
 - Family: only `relations` rows are stored (parent_of, partner) - siblings, grandparents, cousins and labels are derived from them by `backend/family.py`, measured from the library's curator. Labels are gender-neutral (no gender is recorded).
 - Family tree view: `GET /api/family/{id}?generations=N` (nodes with generation + links, from `family.circle`), drawn by `frontend/src/pages/Tree.tsx`; the photos list takes `family_id` + `generations`.

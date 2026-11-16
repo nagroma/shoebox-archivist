@@ -3,6 +3,7 @@ import { Link, useSearchParams } from 'react-router-dom'
 import { api, imageUrl, type PhotoSummary } from '../api'
 import { useApp } from '../state'
 import { BatchEditor } from '../components/BatchEditor'
+import { ShowInFinderButton } from '../components/ShowInFinder'
 
 const FILTERS: [string, string][] = [
   ['all', 'All'],
@@ -85,12 +86,13 @@ export function PhotosPage() {
 
   const person = people.find(p => p.id === personId)
   const familyOf = people.find(p => p.id === familyId)
+  const selectedPhoto = selected.length === 1 ? photos?.find(p => p.id === selected[0]) : undefined
 
   return (
     <div className="page">
       <header className="page-head">
         <h1>Photos {photos && <span className="muted">({photos.length})</span>}</h1>
-        <div className="row">
+        <div className="row wrap">
           <div className="tabs">
             {FILTERS.map(([k, label]) => (
               <button key={k} className={filter === k ? 'active' : ''} onClick={() => set('filter', k === 'all' ? null : k)}>
@@ -101,7 +103,8 @@ export function PhotosPage() {
           {photos && photos.length > 0 && (selected.length
             ? <button onClick={() => setSelected([])}>Clear selection</button>
             : <button onClick={() => setSelected(photos.map(p => p.id))} title="Ctrl/Cmd+A">Select all</button>)}
-          <input placeholder="Search keyword, caption, place, file…" value={q}
+          <ShowInFinderButton imageId={selectedPhoto?.front_id} />
+          <input autoComplete="off" placeholder="Search keyword, caption, place, file…" value={q}
             onChange={e => setQ(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter') set('q', q || null) }}
             onBlur={() => set('q', q || null)} />

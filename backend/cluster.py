@@ -10,18 +10,19 @@ from pathlib import Path
 import numpy as np
 from sklearn.cluster import HDBSCAN
 
-from . import config
+from . import config, face_review
 
 
 def cluster(conn: sqlite3.Connection, min_cluster_size: int | None = None) -> int:
-    """Cluster faces that have no confirmed name. Returns number of clusters.
+    """Cluster visible, unnamed faces. Returns number of clusters.
     min_cluster_size=None uses the value from Settings."""
     if min_cluster_size is None:
         min_cluster_size = config.get(conn, "min_cluster_size")
-    rows = conn.execute(
-        "SELECT id, embedding FROM faces WHERE status IN ('unknown', 'suggested') "
-        "AND candidate = 0 AND embedding IS NOT NULL"
-    ).fetchall()
+    visible, _ = face_review.plan(conn)
+    rows = [r for r in conn.execute(
+        "SELECT id, image_id, embedding FROM faces "
+        "WHERE status IN ('unknown', 'suggested') AND candidate = 0 AND embedding IS NOT NULL"
+    ) if r["image_id"] in visible]
     conn.execute("UPDATE faces SET cluster_id = NULL")
     if len(rows) < min_cluster_size:
         conn.commit()

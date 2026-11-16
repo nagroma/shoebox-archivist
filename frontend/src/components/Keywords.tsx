@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { api, displayName, type Keyword, type PhotoKeyword } from '../api'
+import { api, displayName, type ImageInfo, type Keyword, type PhotoKeyword } from '../api'
 import { useAction } from '../state'
 
 let vocabCache: Keyword[] | null = null
 
 export function useVocabulary(reloadKey?: unknown) {
   const [vocab, setVocab] = useState<Keyword[]>(vocabCache ?? [])
-  useEffect(() => { api.keywords().then(v => { vocabCache = v; setVocab(v) }) }, [reloadKey])
+  useEffect(() => { api.keywords(true).then(v => { vocabCache = v; setVocab(v) }) }, [reloadKey])
   return vocab
 }
 
@@ -40,7 +40,7 @@ export function KeywordInput({ exclude, onPick }: {
 
   return (
     <div className="row kw-add">
-      <input list="kw-vocab" value={text} placeholder="Add keyword…" onChange={e => setText(e.target.value)}
+      <input autoComplete="off" list="kw-vocab" value={text} placeholder="Add keyword…" onChange={e => setText(e.target.value)}
         onKeyDown={e => { if (e.key === 'Enter') add() }} />
       <datalist id="kw-vocab">
         {vocab.filter(k => !exclude?.has(k.id)).map(k => <option key={k.id} value={keywordLabel(k)} />)}
@@ -82,8 +82,10 @@ export function groupByCategory<T extends { category: string }>(items: T[]): [st
 
 /** A photo's keywords grouped by category, with add / remove. Changes are written
  *  into the photo file's XMP keywords (lr:hierarchicalSubject). */
-export function KeywordsCard({ photoId, keywords, onChange }: {
+export function KeywordsCard({ photoId, imageId, images, keywords, onChange }: {
   photoId: number
+  imageId?: number
+  images: ImageInfo[]
   keywords: PhotoKeyword[]
   onChange: () => void
 }) {
@@ -92,27 +94,34 @@ export function KeywordsCard({ photoId, keywords, onChange }: {
 
   async function remove(k: PhotoKeyword) {
     if (k.source === 'file' &&
-        !confirm(`"${k.category}|${k.name}" was already in the file. Remove it from the file?`)) return
+        !confirm(`"${k.category}|${k.name}" was already in the file. Remove it from all scan variants in this family?`)) return
     if (await run(() => api.removeKeyword(photoId, k.id), 'Keyword removed')) onChange()
   }
 
   return (
     <section className="card">
-      <h2>Keywords <span className="muted">({keywords.length})</span></h2>
+      <h2>Keywords across scan variants <span className="muted">({keywords.length})</span></h2>
       {groups.length === 0 && <p className="muted small">No keywords.</p>}
       {groups.map(([cat, ks]) => (
         <div key={cat} className="kw-group">
           <span className="kw-cat">{cat}</span>
-          {ks.map(k => <KeywordChip key={k.id} k={k} onRemove={() => remove(k)} />)}
+          {ks.map(k => {
+            const present = images.filter(image => image.keyword_ids.includes(k.id))
+            const current = images.find(image => image.id === imageId)
+            return <KeywordChip key={k.id} k={{ ...k, source: current?.keyword_sources[k.id] ?? k.source }}
+              extra={<span className="small" title={present.map(image => image.variation_label || image.path).join(', ')}>
+                {' '}· {present.length}/{images.length}{!current?.keyword_ids.includes(k.id) && ' · other variants'}
+              </span>} onRemove={() => remove(k)} />
+          })}
         </div>
       ))}
-      <KeywordInput exclude={new Set(keywords.map(k => k.id))} onPick={async k => {
-        const r = await run(() => api.addKeyword(photoId, { keyword_id: k.id }), 'Keyword added to file')
+      <KeywordInput onPick={async k => {
+        const r = await run(() => api.addKeyword(photoId, { keyword_id: k.id, image_id: imageId }), 'Keyword saved; check Keyword review for any pending scope choices')
         if (r) onChange()
         return !!r
       }} />
       <p className="muted small">
-        Saved into the photo file. <span className="kw app legend">Highlighted</span> = added by this app.
+        Counts show how many scan variants contain each keyword. Keywords apply to all scan variants by default, unless a sharing rule says otherwise. Use the sharing controls below to set exceptions. <span className="kw app legend">Highlighted</span> = added by this app.
       </p>
     </section>
   )

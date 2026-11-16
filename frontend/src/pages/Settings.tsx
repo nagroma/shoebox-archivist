@@ -17,7 +17,7 @@ function Field({ k, label, data, draft, set, indent, children }: {
       <div>
         {children ?? (typeof v === 'boolean'
           ? <input id={k} type="checkbox" checked={v} onChange={e => set(k, e.target.checked)} />
-          : <input id={k} type="number" value={v as number} style={{ width: 90 }}
+          : <input autoComplete="off" id={k} type="number" value={v as number} style={{ width: 90 }}
               step={k === 'suggest_threshold' ? 0.01 : 1}
               onChange={e => set(k, Number(e.target.value))} />)}
       </div>
@@ -68,8 +68,8 @@ export function SettingsPage() {
 
       <section className="card">
         <h2>Face detection</h2>
-        <p className="muted small">Applies to photos scanned from now on. To re-check photos already scanned, run
-          {' '}<code>uv run pm ingest &lt;folder&gt; --rescan</code> (existing faces and names are kept).</p>
+        <p className="muted small">Applies to photos scanned from now on. To re-check a folder, use
+          {' '}<b>Re-scan for faces</b> under <b>Library → Photo folders</b>.</p>
         <Field k="detection_mode" label="Mode" {...props}>
           <select id="detection_mode" value={draft.detection_mode}
             onChange={e => set('detection_mode', e.target.value as Settings['detection_mode'])}>

@@ -1,9 +1,10 @@
+import { Link } from 'react-router-dom'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { api, type IngestState } from '../api'
+import { api, faceRescanSummary, scanProgressText, type IngestState } from '../api'
 import { useApp } from '../state'
 
 /** Top-bar button + dialog: upload photos or rescan the library folder, with live progress. */
-export function AddPhotosButton() {
+export function AddPhotosButton({ scoped }: { scoped: boolean }) {
   const { refresh, stats, toast } = useApp()
   const [open, setOpen] = useState(false)
   const [job, setJob] = useState<IngestState>({ running: false })
@@ -16,8 +17,9 @@ export function AddPhotosButton() {
     const s = await api.ingestStatus()
     setJob(s)
     if (wasRunning.current && !s.running) {
-      if (s.error) toast(`Import failed: ${s.error}`, 'error')
-      else if (s.result) toast(`Imported ${s.result.added} new photo(s), ${s.result.faces} faces found`)
+      if (s.error) toast(`Scan failed: ${s.error}`, 'error')
+      else if (s.result) toast(s.rescan_folder ? faceRescanSummary(s.rescan_folder, s.result)
+        : `Indexed ${s.result.added} new files, found ${s.result.faces} faces`)
       refresh()
       window.dispatchEvent(new Event('library-changed'))
     }
@@ -62,7 +64,7 @@ export function AddPhotosButton() {
   return (
     <>
       <button className={busy ? 'busy' : 'primary'} onClick={() => setOpen(true)}>
-        {busy ? `Importing… ${pct !== null ? pct + '%' : ''}` : '+ Add photos'}
+        {busy ? `Scanning… ${pct !== null ? pct + '%' : ''}` : '+ Add photos'}
       </button>
       {open && (
         <div className="modal-back" onMouseDown={e => { if (e.target === e.currentTarget) setOpen(false) }}>
@@ -86,11 +88,13 @@ export function AddPhotosButton() {
             </div>
             <p className="muted small">
               Uploaded files are copied into <code>Imported/&lt;today&gt;/</code> inside the library folder.
-              Name backs like <code>0012_b.jpg</code> next to <code>0012.jpg</code> to pair them.
+              Configure scan families on <Link to="/library" onClick={() => setOpen(false)}>Library</Link> and sharing on <Link to="/keywords" onClick={() => setOpen(false)}>Keywords</Link>.
             </p>
 
             <div className="action-bar">
-              <button onClick={rescan} disabled={busy}>Scan library folder for new files</button>
+              {scoped
+                ? <Link to="/library" onClick={() => setOpen(false)}>Choose folders to scan</Link>
+                : <button onClick={rescan} disabled={busy}>Scan library folder for new files</button>}
               <span className="muted small" title={stats?.library_root ?? ''}>
                 For photos you copied into <code>{stats?.library_root ?? 'the library folder'}</code> yourself.
               </span>
@@ -100,21 +104,21 @@ export function AddPhotosButton() {
               <div className="job">
                 {job.running && (
                   <>
-                    <div className="row"><b>{job.stage}</b>
-                      <span className="muted small">{job.total ? `${job.done} / ${job.total}` : ''}</span></div>
+                    <div className="row"><b>{scanProgressText(job)}</b></div>
                     <div className="progress"><div style={{ width: `${pct ?? 5}%` }} className={pct === null ? 'indeterminate' : ''} /></div>
                     <p className="muted small">Face detection takes about 1 second per photo. You can close this and keep working.</p>
                   </>
                 )}
-                {!job.running && job.error && <p className="hint error">Import failed: {job.error}</p>}
-                {!job.running && job.result && (
-                  <p>
-                    Last import: <b>{job.result.added}</b> new photo(s)
+                {!job.running && job.error && <p className="hint error">Scan failed: {job.error}</p>}
+                {!job.running && job.result && (job.rescan_folder ? <p>{faceRescanSummary(job.rescan_folder, job.result)}</p> : (
+                  <div><p>
+                    Last scan: <b>{job.result.added}</b> new files
                     {job.result.duplicates > 0 && <>, {job.result.duplicates} duplicate(s) skipped</>},
                     {' '}{job.result.dated} dated from camera info, <b>{job.result.faces}</b> faces found,
                     {' '}{job.result.suggestions} name suggestions.
-                  </p>
-                )}
+                  </p><p>Keyword check: {job.result.keyword_differences ?? 0} differences, {job.result.keyword_choices ?? 0} scope choices,
+                    {' '}{job.result.keyword_errors ?? 0} unreadable files, {job.result.variation_issues ?? 0} scan variants to review. <Link to="/keywords/review" onClick={() => setOpen(false)}>Review results</Link></p></div>
+                ))}
               </div>
             )}
           </div>

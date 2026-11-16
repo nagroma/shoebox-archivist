@@ -15,7 +15,10 @@ FIELDS: dict[str, tuple] = {
     "pass_enlarged": (True, bool, "extra pass at a larger detector size (small faces); thorough mode only"),
     "pass_rotated": (True, bool, "extra passes on rotated copies (tilted or lying-down heads)"),
     "suggest_threshold": (0.35, float, "similarity needed before a name is suggested (higher = fewer, safer suggestions)"),
-    "keyword_autoconfirm": (True, bool, "a photo keyworded with one person that shows one face: name that face"),
+    "keyword_autoconfirm": (True, bool,
+        "Automatically confirm a single face when the photo has one tagged person. "
+        "In a group photo, if your confirmations leave exactly one face and one tagged person unmatched, "
+        "Shoebox confirms that last match too. Previous rejections are respected."),
     "min_cluster_size": (3, int, "smallest group of similar unnamed faces shown as a cluster"),
     "preselect_non_faces": (True, bool, "pre-select possible faces that look like earlier 'not a face' decisions"),
 }

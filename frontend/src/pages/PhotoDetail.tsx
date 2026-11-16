@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
-import { api, displayName, faceThumb, imageUrl, type Face, type ParsedDate, type PhotoDetail } from '../api'
+import { api, displayName, faceThumb, imageUrl, setFaceThumbRevision, type Face, type ParsedDate, type PhotoDetail } from '../api'
 import { KeywordsCard } from '../components/Keywords'
+import { PhotoVersionsCard } from '../components/PhotoVersions'
 import { FileMetadata } from '../components/FileMetadata'
 import { PersonPicker } from '../components/PersonPicker'
+import { ShowInFinderButton } from '../components/ShowInFinder'
 import { useAction, useApp } from '../state'
 import { photoSequence, setPhotoSequence } from './Photos'
 
@@ -23,17 +25,22 @@ export function PhotoDetailPage() {
   const run = useAction()
   const [photo, setPhoto] = useState<PhotoDetail | null>(null)
   const [form, setForm] = useState<Form | null>(null)
+  const [versionId, setVersionId] = useState<number | null>(null)
   const [side, setSide] = useState<'front' | 'back'>('front')
   const [activeFace, setActiveFace] = useState<number | null>(search.get('face') ? Number(search.get('face')) : null)
   const [showBoxes, setShowBoxes] = useState(true)
+  const [previewRevisions, setPreviewRevisions] = useState<Record<number, string>>({})
+  const [refreshingPreview, setRefreshingPreview] = useState(false)
+  const [repair, setRepair] = useState<{ faceId: number; rotate: boolean } | null>(null)
+  const [repairing, setRepairing] = useState(false)
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (keepEdits = false) => {
     const p = await api.photo(photoId)
     setPhoto(p)
-    setForm(toForm(p))
+    if (!keepEdits) setForm(toForm(p))
   }, [photoId])
 
-  useEffect(() => { setSide('front'); load() }, [load])
+  useEffect(() => { setSide('front'); setVersionId(null); setRepair(null); load() }, [load])
 
   // Opened directly (not from the Photos list): step through all photos.
   const [, setSeqLoaded] = useState(false)
@@ -70,7 +77,7 @@ export function PhotoDetailPage() {
       else if (!inField && e.key === 'ArrowLeft') go(prev)
       else if (!inField && e.key === 'ArrowRight') go(next)
       else if (!inField && e.key === 'b' && photo?.images.some(i => i.role === 'back'))
-        setSide(s => (s === 'front' ? 'back' : 'front'))
+        { setVersionId(null); setActiveFace(null); setSide(s => (s === 'front' ? 'back' : 'front')) }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -78,10 +85,43 @@ export function PhotoDetailPage() {
 
   if (!photo || !form) return <p className="muted pad">Loading…</p>
 
-  const front = photo.images.find(i => i.role === 'front') ?? photo.images[0]
+  const front = photo.images.find(i => i.is_primary) ?? photo.images.find(i => i.role === 'front') ?? photo.images[0]
   const back = photo.images.find(i => i.role === 'back')
-  const shown = side === 'back' && back ? back : front
+  const faceImageId = photo.faces.find(f => f.id === activeFace)?.image_id
+  const shown = photo.images.find(i => i.id === (versionId ?? faceImageId)) ?? (side === 'back' && back ? back : front)
   const faces = photo.faces.filter(f => f.image_id === shown.id)
+  const selectedFace = faces.find(face => face.id === activeFace)
+  const repairFace = faces.find(face => face.id === repair?.faceId)
+  const repairBox = repairFace && (repair?.rotate
+    ? [1 - repairFace.bbox[2], 1 - repairFace.bbox[3], 1 - repairFace.bbox[0], 1 - repairFace.bbox[1]]
+    : repairFace.bbox)
+
+  async function applyFaceRepair() {
+    if (!repair || !repairFace || repairing) return
+    setRepairing(true)
+    try {
+      const result = await run(() => api.repairFace(repairFace.id, repair.rotate), 'Face thumbnail rebuilt')
+      if (result) {
+        setFaceThumbRevision(result.face_id, result.revision)
+        setActiveFace(result.face_id)
+        setRepair(null)
+        await run(() => load(true))
+        refresh()
+      }
+    } finally {
+      setRepairing(false)
+    }
+  }
+
+  async function refreshShownPreview() {
+    setRefreshingPreview(true)
+    try {
+      const result = await run(() => api.refreshPreview(shown.id), 'Preview refreshed')
+      if (result) setPreviewRevisions(current => ({ ...current, [shown.id]: result.revision }))
+    } finally {
+      setRefreshingPreview(false)
+    }
+  }
 
   async function faceAct(fn: () => Promise<unknown>, msg: string) {
     if ((await run(fn, msg)) !== undefined) { await load(); refresh() }
@@ -96,26 +136,51 @@ export function PhotoDetailPage() {
           <button disabled={next === null} onClick={() => go(next)} title="Next (→)">Next ›</button>
           {idx >= 0 && <span className="muted small">{idx + 1} / {photoSequence.length}</span>}
           <span className="grow" />
-          {back && (
-            <div className="tabs">
-              <button className={side === 'front' ? 'active' : ''} onClick={() => setSide('front')}>Front</button>
-              <button className={side === 'back' ? 'active' : ''} onClick={() => setSide('back')} title="Toggle (B)">Back</button>
-            </div>
-          )}
+          {photo.images.length > 1 && <div className="tabs version-tabs" role="group" aria-label="Scan variants">
+            {photo.images.map(image => <button key={image.id} className={shown.id === image.id ? 'active' : ''}
+              title={image.path} onClick={() => { setVersionId(image.id); setActiveFace(null) }}>
+              {image.variation_label || image.role}{image.recognition_enabled ? ' · Faces' : ''}
+              <small>{image.variation || '(no suffix)'} · {image.path.split('.').pop()}</small>
+            </button>)}
+          </div>}
+          <ShowInFinderButton imageId={shown.id} />
+          <button disabled={refreshingPreview} onClick={refreshShownPreview} title="Rebuild the preview from this scan file">
+            {refreshingPreview ? 'Refreshing preview…' : 'Refresh preview'}
+          </button>
+          <button disabled={!selectedFace || repairing} title="Select a face box or thumbnail to repair"
+            onClick={() => {
+              if (selectedFace) {
+                setRepair({ faceId: selectedFace.id, rotate: true })
+                setShowBoxes(true)
+              }
+            }}>Repair face…</button>
           <label className="small"><input type="checkbox" checked={showBoxes} onChange={e => setShowBoxes(e.target.checked)} /> Face boxes</label>
         </div>
+        {repair && repairFace && <div className="face-repair-panel">
+          <label className="row"><input type="checkbox" checked={repair.rotate} disabled={repairing}
+            onChange={e => setRepair({ ...repair, rotate: e.target.checked })} />Move box 180°</label>
+          <p className="muted small">Check the blue dashed box before applying. Clear the checkbox to rebuild just the thumbnail.</p>
+          <div className="row">
+            <button className="primary" disabled={repairing} onClick={applyFaceRepair}>
+              {repairing ? 'Repairing face…' : 'Apply repair'}
+            </button>
+            <button disabled={repairing} onClick={() => setRepair(null)}>Cancel</button>
+          </div>
+        </div>}
         <div className="stage">
           <div className="img-wrap">
-            <img src={imageUrl(shown.id)} alt="" />
-            {showBoxes && (
+            <img src={imageUrl(shown.id, 'large', previewRevisions[shown.id])} alt="" />
+            {(showBoxes || repairBox) && (
               <svg viewBox="0 0 1 1" preserveAspectRatio="none" className="boxes">
-                {faces.map(f => (
+                {showBoxes && faces.map(f => (
                   <rect key={f.id}
                     x={f.bbox[0]} y={f.bbox[1]} width={f.bbox[2] - f.bbox[0]} height={f.bbox[3] - f.bbox[1]}
                     className={`box ${f.status} ${activeFace === f.id ? 'active' : ''}`}
                     vectorEffect="non-scaling-stroke"
                     onClick={() => setActiveFace(f.id)} />
                 ))}
+                {repairBox && <rect className="face-repair-box" vectorEffect="non-scaling-stroke"
+                  x={repairBox[0]} y={repairBox[1]} width={repairBox[2] - repairBox[0]} height={repairBox[3] - repairBox[1]} />}
               </svg>
             )}
             {showBoxes && faces.map(f => (
@@ -141,7 +206,7 @@ export function PhotoDetailPage() {
           {photo.date_source === 'exif' && form.date_text === toForm(photo).date_text && (
             <p className="source">📷 From camera info{photo.taken_at && <> · taken {photo.taken_at.replace('T', ' ')}</>}</p>
           )}
-          <label>Location<input value={form.location} onChange={e => setForm({ ...form, location: e.target.value })}
+          <label>Location<input autoComplete="off" value={form.location} onChange={e => setForm({ ...form, location: e.target.value })}
             placeholder="e.g. Grandma's farm, Lancaster PA" /></label>
           {photo.gps_lat !== null && photo.gps_lon !== null && (
             <p className="source">
@@ -150,12 +215,12 @@ export function PhotoDetailPage() {
                 target="_blank" rel="noreferrer">{photo.gps_lat.toFixed(5)}, {photo.gps_lon.toFixed(5)} ↗</a>
             </p>
           )}
-          <label>Caption<textarea rows={2} value={form.caption} onChange={e => setForm({ ...form, caption: e.target.value })} /></label>
+          <label>Caption<textarea autoComplete="off" rows={2} value={form.caption} onChange={e => setForm({ ...form, caption: e.target.value })} /></label>
           <label>Written on back
-            <textarea rows={3} value={form.back_text} onChange={e => setForm({ ...form, back_text: e.target.value })}
+            <textarea autoComplete="off" rows={3} value={form.back_text} onChange={e => setForm({ ...form, back_text: e.target.value })}
               placeholder={back ? 'Transcribe the handwriting…' : 'No back scanned'} />
           </label>
-          <label>Notes<textarea rows={2} value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} /></label>
+          <label>Notes<textarea autoComplete="off" rows={2} value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} /></label>
           <div className="row">
             <button className="primary" disabled={!dirty} onClick={save}>Save</button>
             {dirty && <button onClick={() => setForm(toForm(photo))}>Revert</button>}
@@ -169,7 +234,7 @@ export function PhotoDetailPage() {
           <ul className="face-list">
             {[...photo.faces].sort((a, b) => a.bbox[0] - b.bbox[0]).map(f => (
               <FaceRow key={f.id} face={f} active={activeFace === f.id}
-                onFocus={() => setActiveFace(f.id)} act={faceAct} />
+                onFocus={() => { setActiveFace(f.id); setVersionId(f.image_id) }} act={faceAct} />
             ))}
           </ul>
           <p className="muted small">Listed left to right.</p>
@@ -182,8 +247,9 @@ export function PhotoDetailPage() {
           })()}
         </section>
 
-        <KeywordsCard photoId={photoId} keywords={photo.keywords} onChange={() => { load(); refresh() }} />
-        <FileMetadata key={photoId} photoId={photoId} />
+        <KeywordsCard images={photo.images} imageId={shown.id} photoId={photoId} keywords={photo.keywords} onChange={() => { load(); refresh() }} />
+        <PhotoVersionsCard photo={photo} onChange={() => { load(); refresh() }} />
+        <FileMetadata key={`${photoId}:${shown.id}`} imageId={shown.id} photoId={photoId} />
       </aside>
     </div>
   )
@@ -241,7 +307,7 @@ function DateField({ value, onChange }: { value: string; onChange: (v: string) =
   }, [value])
   return (
     <label>Date
-      <input value={value} onChange={e => onChange(e.target.value)}
+      <input autoComplete="off" value={value} onChange={e => onChange(e.target.value)}
         placeholder="e.g. 1920s, c. 1925, May 1923, summer 1948, 1920-1925"
         className={parsed === null ? 'invalid' : ''} />
       <span className={`hint ${parsed === null ? 'error' : parsed === undefined ? 'muted' : ''}`}>

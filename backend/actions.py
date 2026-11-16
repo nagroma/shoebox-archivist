@@ -5,7 +5,7 @@ import sqlite3
 import sys
 from collections.abc import Iterable
 
-from . import dates, db, family, keywords, match, xmp
+from . import dates, db, family, keywords, match, xmp, sharing
 
 
 def _many(conn: sqlite3.Connection, sql: str, ids: Iterable[int], *extra) -> None:
@@ -28,12 +28,18 @@ def _confirmed_pairs(conn: sqlite3.Connection, face_ids: list[int]) -> set[tuple
 
 def _front_path(conn: sqlite3.Connection, photo_id: int):
     row = conn.execute("SELECT path FROM images WHERE photo_id = ? AND role = 'front' "
-                       "ORDER BY id LIMIT 1", (photo_id,)).fetchone()
+                       "ORDER BY is_primary DESC, id LIMIT 1", (photo_id,)).fetchone()
     return db.library_root(conn) / row["path"] if row else None
 
 
 def add_photo_keyword(conn: sqlite3.Connection, photo_id: int, keyword_id: int) -> bool:
     """Put a keyword on a photo: in the DB and in the file. False if already there."""
+    if conn.execute('SELECT 1 FROM images WHERE photo_id=?', (photo_id,)).fetchone():
+        try:
+            return sharing.add(conn, photo_id, keyword_id)
+        except Exception as e:
+            print(f'Could not write keyword for photo {photo_id}: {e}', file=sys.stderr)
+            return False
     if conn.execute("SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
                     (photo_id, keyword_id)).fetchone():
         return False
@@ -52,6 +58,12 @@ def add_photo_keyword(conn: sqlite3.Connection, photo_id: int, keyword_id: int) 
 def remove_photo_keyword(conn: sqlite3.Connection, photo_id: int, keyword_id: int,
                          only_app: bool = True) -> bool:
     """Take a keyword off a photo. By default only keywords this app added."""
+    if conn.execute('SELECT 1 FROM images WHERE photo_id=?', (photo_id,)).fetchone():
+        try:
+            return sharing.remove(conn, photo_id, keyword_id, only_app)
+        except Exception as e:
+            print(f'Could not remove keyword for photo {photo_id}: {e}', file=sys.stderr)
+            return False
     row = conn.execute("SELECT source FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
                        (photo_id, keyword_id)).fetchone()
     if row is None or (only_app and row["source"] != "app"):
@@ -76,8 +88,8 @@ def _sync_keywords(conn: sqlite3.Connection, pairs: set[tuple[int, int]]) -> Non
             "SELECT 1 FROM faces f JOIN images i ON i.id = f.image_id WHERE i.photo_id = ? "
             "AND f.person_id = ? AND f.status = 'confirmed'", (photo_id, person_id)).fetchone()
         if confirmed:
-            if not keywords.photo_people(conn, photo_id) & {person_id}:
-                add_photo_keyword(conn, photo_id, keywords.person_keyword(conn, person_id))
+            for kid in keywords.person_keywords(conn, person_id):
+                add_photo_keyword(conn, photo_id, kid)
         else:
             for (kid,) in conn.execute("SELECT id FROM keywords WHERE person_id = ?", (person_id,)).fetchall():
                 remove_photo_keyword(conn, photo_id, kid)
@@ -164,6 +176,26 @@ def assign(conn: sqlite3.Connection, face_ids: list[int], person_id: int) -> Non
     _sync_keywords(conn, before | _confirmed_pairs(conn, face_ids))
 
 
+def accept_suggestions(conn: sqlite3.Connection, selections: list[tuple[int, int]]) -> int:
+    """Confirm each selected unclustered face as the person shown in its guess."""
+    face_ids = [fid for fid, _ in selections]
+    if not face_ids or len(set(face_ids)) != len(face_ids):
+        raise ValueError('Select one or more distinct faces with guesses')
+    # The conditional updates and transaction protect against stale guesses and
+    # ensure a changed selection cannot confirm any of the other faces.
+    with conn:
+        for face_id, person_id in selections:
+            cursor = conn.execute(
+                "UPDATE faces SET status = 'confirmed', confidence = NULL, label_source = 'user' "
+                "WHERE id = ? AND person_id = ? AND status = 'suggested' AND candidate = 0 "
+                "AND (cluster_id IS NULL OR cluster_id = -1)", (face_id, person_id))
+            if cursor.rowcount != 1:
+                raise ValueError('A selected guess changed. Review the selection again; no guesses were accepted.')
+        conn.executemany("DELETE FROM rejections WHERE face_id = ? AND person_id = ?", selections)
+    _sync_keywords(conn, _confirmed_pairs(conn, face_ids))
+    return len(face_ids)
+
+
 def reject(conn: sqlite3.Connection, face_ids: list[int]) -> int:
     """Reject the current name (suggested or confirmed) on faces. The pairing is
     remembered so it won't be suggested again; the face goes back to unknown.
@@ -211,6 +243,10 @@ def remove_from_cluster(conn: sqlite3.Connection, face_ids: list[int]) -> None:
 def merge_people(conn: sqlite3.Connection, src: int, dst: int) -> None:
     conn.execute("UPDATE faces SET person_id = ? WHERE person_id = ?", (dst, src))
     conn.execute("UPDATE keywords SET person_id = ? WHERE person_id = ?", (dst, src))
+    if not conn.execute("SELECT 1 FROM person_keyword_choices WHERE person_id = ?", (dst,)).fetchone():
+        conn.execute("UPDATE person_keyword_choices SET person_id = ? WHERE person_id = ?", (dst, src))
+    else:
+        conn.execute("DELETE FROM person_keyword_choices WHERE person_id = ?", (src,))
     conn.execute("UPDATE OR IGNORE person_names SET person_id = ? WHERE person_id = ?", (dst, src))
     conn.execute("UPDATE OR IGNORE rejections SET person_id = ? WHERE person_id = ?", (dst, src))
     family.move(conn, src, dst)

@@ -9,14 +9,35 @@ interface AppState {
   /** Resolve typed text to an existing person (case-insensitive) or a new name. */
   resolvePerson: (text: string) => PersonRef | null
   toast: (msg: string, kind?: 'ok' | 'error') => void
+  showPeopleKeywords: boolean
+  setShowPeopleKeywords: (show: boolean) => void
 }
 
 const Ctx = createContext<AppState | null>(null)
+const PEOPLE_KEYWORDS_KEY = 'shoebox.faces.showPeopleKeywords'
 
 export function AppProvider({ children }: { children: ReactNode }) {
   const [people, setPeople] = useState<PersonSummary[]>([])
   const [stats, setStats] = useState<Stats | null>(null)
   const [toasts, setToasts] = useState<{ id: number; msg: string; kind: string }[]>([])
+  const [showPeopleKeywords, updateShowPeopleKeywords] = useState(() => {
+    try { return localStorage.getItem(PEOPLE_KEYWORDS_KEY) === 'true' }
+    catch { return false }
+  })
+
+  const setShowPeopleKeywords = useCallback((show: boolean) => {
+    updateShowPeopleKeywords(show)
+    try { localStorage.setItem(PEOPLE_KEYWORDS_KEY, String(show)) }
+    catch { /* Keep the preference for this session. */ }
+  }, [])
+
+  useEffect(() => {
+    function syncPeopleKeywords(event: StorageEvent) {
+      if (event.key === PEOPLE_KEYWORDS_KEY) updateShowPeopleKeywords(event.newValue === 'true')
+    }
+    window.addEventListener('storage', syncPeopleKeywords)
+    return () => window.removeEventListener('storage', syncPeopleKeywords)
+  }, [])
 
   const refresh = useCallback(async () => {
     const [p, s] = await Promise.all([api.people(), api.stats()])
@@ -30,9 +51,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const resolvePerson = useCallback((text: string): PersonRef | null => {
     const t = text.trim()
     if (!t) return null
-    const low = t.toLowerCase()
-    const hit = people.find(p => p.name.toLowerCase() === low) ??
-      people.find(p => p.aliases?.some(a => a.name.toLowerCase() === low))
+    const low = t.replace(/\s/g, '').toLowerCase()
+    const hit = people.find(p => p.name.replace(/\s/g, '').toLowerCase() === low) ??
+      people.find(p => p.aliases?.some(a => a.name.replace(/\s/g, '').toLowerCase() === low)) ??
+      people.find(p => p.keyword_paths?.some(k => k.split('|').slice(-1)[0]?.replace(/\s/g, '').toLowerCase() === low))
     return hit ? { person_id: hit.id } : { name: t }
   }, [people])
 
@@ -43,7 +65,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, [])
 
   return (
-    <Ctx.Provider value={{ people, stats, refresh, resolvePerson, toast }}>
+    <Ctx.Provider value={{ people, stats, refresh, resolvePerson, toast, showPeopleKeywords, setShowPeopleKeywords }}>
       {stats ? children : <p className="muted pad">Loading…</p>}
       <div className="toasts">
         {toasts.map(t => <div key={t.id} className={`toast ${t.kind}`}>{t.msg}</div>)}

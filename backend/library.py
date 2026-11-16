@@ -17,7 +17,7 @@ from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
 
-from . import db, ingest, keywords, xmp
+from . import db, folders, ingest, keywords, xmp
 
 LIB_DIR = ".shoebox"
 
@@ -168,6 +168,20 @@ def propose_facets(found: dict | None, preset: str = "family") -> list[dict]:
     return facets
 
 
+def inspect_vocabulary(root: Path, preset: str) -> tuple[bool, list[dict]]:
+    path = root / ingest.VOCABULARY_FILE
+    if not path.is_file():
+        return False, propose_facets(None, preset)
+    content = path.read_text(encoding="utf-8-sig")
+    groups = Counter(keywords.top_level(category) for category, _ in keywords.parse_vocabulary(content))
+    facets = propose_facets({"top": groups}, preset)
+    people = keywords.person_groups(content)
+    for facet in facets:
+        if facet["name"] in people:
+            facet["kind"] = "person"
+    return True, facets
+
+
 # ------------------------------------------------------------------ create / reset
 
 CURATOR_SETTING = "curator_person_id"
@@ -194,7 +208,7 @@ def get_curator(conn: sqlite3.Connection) -> dict | None:
 
 
 def create(root: Path, facets: list[dict], found: dict | None = None,
-           curator: str = "") -> Path:
+           curator: str = "", *, staged: bool = False) -> Path:
     """Create the data folder, configure facets, and seed the vocabulary with the
     hierarchical keywords found in the files. Returns the data directory.
     Photos are not modified. Raises FileExistsError if the folder already has a library."""
@@ -204,6 +218,7 @@ def create(root: Path, facets: list[dict], found: dict | None = None,
     if has_library(root):
         raise FileExistsError(f"{root} already has a Shoebox Archivist library")
     data = data_dir_for(root)
+    new_data = not data.exists()
     data.mkdir(exist_ok=True)
     conn = db.connect(data / "library.db")
     try:
@@ -213,11 +228,20 @@ def create(root: Path, facets: list[dict], found: dict | None = None,
             category, name = keywords.split(path)
             if category:
                 keywords.ensure(conn, category, name, in_vocab=True)
+        if staged:
+            folders.Policy(default=False, active=True).save(conn)
+            vocabulary = root / ingest.VOCABULARY_FILE
+            if vocabulary.is_file():
+                keywords.load_vocabulary(conn, vocabulary)
         set_curator(conn, curator)
         conn.commit()
     except Exception:
         conn.close()
-        shutil.rmtree(data, ignore_errors=True)
+        if new_data:
+            shutil.rmtree(data, ignore_errors=True)
+        else:
+            for suffix in ("", "-wal", "-shm", "-journal"):
+                (data / f"library.db{suffix}").unlink(missing_ok=True)
         raise
     conn.close()
     return data
@@ -250,6 +274,7 @@ def describe(conn: sqlite3.Connection) -> dict:
         "root": db.get_setting(conn, "library_root"),
         "data_dir": str(_current.resolve()) if _current else None,
         "managed": is_managed(),
+        "folder_scoped": folders.load(conn).active,
         "curator": get_curator(conn),
         "facets": [{**f, "keywords": keywords._facet_keyword_count(conn, f["name"])}
                    for f in keywords.get_facets(conn)],

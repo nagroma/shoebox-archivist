@@ -43,15 +43,10 @@ def refresh(conn: sqlite3.Connection, args) -> None:
 
 
 def cmd_ingest(conn, args):
-    if args.rescan or args.rescan_empty:
-        only_empty = "" if args.rescan else "AND id NOT IN (SELECT image_id FROM faces)"
-        n = conn.execute("UPDATE images SET faces_scanned = 0 WHERE role = 'front' "
-                         f"AND faces_scanned = 1 {only_empty}").rowcount
-        conn.commit()
-        print(f"Re-scanning {n} photo(s); existing faces and names are kept")
+    rescan = "all" if args.rescan else "empty" if args.rescan_empty else None
     try:
         ingest.ingest(conn, Path(args.folder), DATA / "thumbs", args.det_size,
-                      thorough=False if args.fast else None)
+                      thorough=False if args.fast else None, rescan=rescan)
     except ValueError as e:
         raise SystemExit(str(e))
     refresh(conn, args)
@@ -208,9 +203,9 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("folder")
     s.add_argument("--det-size", type=int, default=1024)
     s.add_argument("--rescan-empty", action="store_true",
-                   help="look again for faces in photos where none were found")
+                   help="look again in this folder and its subfolders where no faces were found")
     s.add_argument("--rescan", action="store_true",
-                   help="look again for missed faces in every photo (keeps existing faces/names)")
+                   help="look again in this folder and its subfolders (keeps existing faces and names)")
     s.add_argument("--fast", action="store_true",
                    help="fast detection for this run (default: the mode in Settings)")
     s.set_defaults(func=cmd_ingest)

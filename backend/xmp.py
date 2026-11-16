@@ -6,7 +6,8 @@ The photos carry Lightroom/Bridge-style keywords:
 plus photoshop:DateCreated and dc:description (caption).
 Bridge also keeps legacy copies (IPTC Keywords/Caption/DateCreated, EXIF ImageDescription/
 DateTimeOriginal). When the app changes a value it updates those copies too, so other
-apps don't show stale data - IPTC only if the file has an IPTC record, EXIF only for tags
+apps don't show stale data - IPTC Keywords are created when needed; other IPTC fields
+only if the file has an IPTC record, EXIF only for tags
 already present.
 
 Every keyword this app adds is also listed in its own namespace (pm:AddedKeywords),
@@ -22,6 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pyexiv2
+import json
 
 # Namespace URI kept from the original project name: it is already written into photos,
 # and changing it would orphan existing pm: provenance (pm strip could no longer undo it).
@@ -196,6 +198,16 @@ def restore_fields(path: Path) -> list[str]:
         if EDTF in x:
             out["Xmp"][EDTF] = None
         _apply(im, out)
+        flat_restore = {}
+        for marker, key, fn in [('Xmp.pm.OriginalHierarchicalSubject', HS, im.modify_xmp),
+                                ('Xmp.pm.OriginalFlatSubject', SUBJ, im.modify_xmp),
+                                ('Xmp.pm.OriginalFlatIptc', IPTC_KW, im.modify_iptc),
+                                ('Xmp.pm.OriginalFlatXP', EXIF_XPKW, im.modify_exif)]:
+            if marker in x:
+                fn({key: json.loads(x[marker]) or None})
+                flat_restore[marker] = None
+        if flat_restore:
+            im.modify_xmp(flat_restore)
     return [k for k in (DESC, DATE, LOC) if k in out["Xmp"]]
 
 
@@ -203,15 +215,50 @@ def leaf(keyword: str) -> str:
     return keyword.rsplit("|", 1)[-1]
 
 
+def _keyword_originals(im) -> None:
+    """Before explicit owner removals, save the pre-app keyword values for pm strip."""
+    x, iptc = im.read_xmp(), im.read_iptc()
+    app = _list(x.get(ADDED))
+    flat_added = _list(x.get('Xmp.pm.AddedFlatKeywords')) if x.get('Xmp.pm.IptcKeywordsTracked') else [leaf(k) for k in app]
+    iptc_added = _list(x.get('Xmp.pm.AddedIptcKeywords')) if x.get('Xmp.pm.IptcKeywordsTracked') else [leaf(k) for k in app]
+    values = {'Xmp.pm.OriginalHierarchicalSubject': [v for v in _list(x.get(HS)) if v not in app],
+              'Xmp.pm.OriginalFlatSubject': [v for v in _list(x.get(SUBJ)) if v not in flat_added],
+              'Xmp.pm.OriginalFlatIptc': [v for v in _list(iptc.get(IPTC_KW)) if v not in iptc_added]}
+    im.modify_xmp({k: json.dumps(v) for k, v in values.items() if k not in x})
+
+
 def _write(path: Path, hs: list[str], flat: list[str], added: list[str],
-           iptc_add: list[str] = (), iptc_remove: set[str] = frozenset()) -> None:
+           iptc_add: list[str] = (), iptc_remove: set[str] = frozenset(),
+           only_app: bool = True) -> None:
     with pyexiv2.Image(str(path)) as im:
-        im.modify_xmp({HS: hs or None, SUBJ: flat or None, ADDED: added or None})
+        if not only_app:
+            _keyword_originals(im)
         iptc = im.read_iptc()
-        if iptc:  # keep Bridge's IPTC copy in step
-            kws = [k for k in _list(iptc.get(IPTC_KW)) if k not in iptc_remove]
-            kws += [k for k in iptc_add if k not in kws]
+        x = im.read_xmp()
+        before = _list(iptc.get(IPTC_KW))
+        tracked_key, added_key = "Xmp.pm.IptcKeywordsTracked", "Xmp.pm.AddedIptcKeywords"
+        # Old app edits predate per-field tracking. Preserve their previous undo behavior.
+        managed = _list(x.get(added_key)) if x.get(tracked_key) else [
+            leaf(k) for k in _list(x.get(ADDED)) if leaf(k) in before]
+        kws = [k for k in before if k not in iptc_remove or (only_app and k not in managed)]
+        managed = [k for k in managed if k in kws]
+        for k in iptc_add:
+            if k not in kws:
+                kws.append(k)
+                managed.append(k)
+        if kws != before:
             im.modify_iptc({IPTC_KW: kws or None})
+        im.modify_xmp({tracked_key: "true", added_key: managed or None})
+        old_flat = _list(x.get(SUBJ))
+        flat_key = "Xmp.pm.AddedFlatKeywords"
+        owned_flat = _list(x.get(flat_key)) if x.get(tracked_key) else [
+            leaf(k) for k in _list(x.get(ADDED)) if leaf(k) in old_flat]
+        # A pre-existing flat name may be reused by a new hierarchy; undo must keep it.
+        if only_app:
+            flat += [k for k in old_flat if k not in flat and k not in owned_flat]
+        owned_flat = [k for k in owned_flat if k in flat] + [k for k in flat if k not in old_flat]
+        im.modify_xmp({HS: hs or None, SUBJ: list(dict.fromkeys(flat)) or None,
+                       ADDED: added or None, flat_key: list(dict.fromkeys(owned_flat)) or None})
 
 
 def add_keywords(path: Path, keywords: list[str]) -> list[str]:
@@ -236,8 +283,32 @@ def remove_keywords(path: Path, keywords: list[str], only_app_added: bool = True
     still = {leaf(k) for k in hs}
     flat = [f for f in info.flat if f in still or f not in {leaf(k) for k in gone}]
     _write(path, hs, flat, [k for k in info.app_added if k not in gone],
-           iptc_remove={leaf(k) for k in gone} - still)
+           iptc_remove={leaf(k) for k in gone} - still, only_app=only_app_added)
     return gone
+
+
+def remove_flat_keyword(path: Path, name: str) -> None:
+    """An explicit owner-keyword deletion saves prior flat fields for pm strip."""
+    with pyexiv2.Image(str(path)) as im:
+        _keyword_originals(im)
+        x, iptc, exif = im.read_xmp(), im.read_iptc(), im.read_exif()
+        updates = {}
+        flat = _list(x.get(SUBJ))
+        if name in flat:
+            if 'Xmp.pm.OriginalFlatSubject' not in x:
+                updates['Xmp.pm.OriginalFlatSubject'] = json.dumps(flat)
+            updates[SUBJ] = [v for v in flat if v != name] or None
+        old = _list(iptc.get(IPTC_KW))
+        if name in old:
+            if 'Xmp.pm.OriginalFlatIptc' not in x:
+                updates['Xmp.pm.OriginalFlatIptc'] = json.dumps(old)
+            im.modify_iptc({IPTC_KW: [v for v in old if v != name] or None})
+        xp = _xp(exif.get(EXIF_XPKW))
+        if name in xp:
+            if 'Xmp.pm.OriginalFlatXP' not in x:
+                updates['Xmp.pm.OriginalFlatXP'] = json.dumps(exif[EXIF_XPKW])
+            im.modify_exif({EXIF_XPKW: ';'.join(v for v in xp if v != name) or None})
+        im.modify_xmp(updates)
 
 
 def strip_app_keywords(path: Path) -> list[str]:

@@ -34,13 +34,13 @@ const BADGE = {
 const show = (v: unknown) => typeof v === 'string' ? v : JSON.stringify(v)
 
 /** Every EXIF / IPTC / XMP tag in the front image, read-only (for debugging). */
-export function FileMetadata({ photoId }: { photoId: number }) {
+export function FileMetadata({ photoId, imageId }: { photoId: number; imageId?: number }) {
   const [data, setData] = useState<Meta | null>(null)
   const [error, setError] = useState('')
 
   useEffect(() => {
-    api.fileMetadata(photoId).then(setData, e => setError((e as Error).message))
-  }, [photoId])
+    api.fileMetadata(photoId, imageId).then(setData, e => setError((e as Error).message))
+  }, [photoId, imageId])
 
   return (
     <section className="card">
