@@ -3,18 +3,26 @@
 Shoebox Archivist helps you name the people in your family photos, date them (even when you only know "about 1950"), and keep it all **inside the photo files**, so other programs like Adobe Bridge or Lightroom see it too.
 
 Open the app at **http://127.0.0.1:8765** after starting it with `uv run pm serve`.
-The menu at the top has three pages, **Photos**, **People** and **Faces**, plus the **Add photos** button and **⚙ Settings**.
+Use **Library** to open an archive, choose folders to scan, and set filename conventions. Use **Keywords** to manage the vocabulary, sharing rules, and keyword review.
 
 ---
 
-## 1. Adding photos
-1. Click **Add photos**.
-2. Either:
-   - **drop photos** on the box, or click it to choose files (JPG, PNG, TIFF, BMP, WebP). They're copied into your library under `Imported/<today>/`; or
-   - click **Scan library folder for new files** if you've copied photos into the library folder yourself.
-3. The app reads each photo's existing metadata and looks for faces. You can close the window and keep working.
-   - Detection is **thorough** by default: it looks several times (contrast-enhanced, enlarged, rotated) so that tilted, small and faded faces aren't missed. That's several seconds per photo on a CPU, much less with a graphics card.
-   - Switch to **Fast** under **Settings** if speed matters more than catching every face.
+## 1. Opening and scanning a library
+
+To switch libraries, click **Close library** on the **Library** page. This returns you to the folder picker, where you can open an existing library or create one.
+
+To start with one part of an archive, choose its root in **Library** and leave **Choose which folders to scan after creating the library** checked. Setup stores the app's database and thumbnails under `.shoebox` at the root.
+
+Drag the archive folder onto the folder path field or paste its full path and click **Go**. On a Mac, **Browse iCloud Drive** opens the iCloud Drive folder directly when it is available. In Finder, you can select the archive folder and press **Option–Command–C** to copy its path.
+
+1. Expand the folders under **Photo folders**.
+2. Check **Identify faces in this folder** where you want to detect and review faces. Check **Learn from this folder** where you want confirmed faces used for future suggestions. Check both while identifying a batch you want to learn from, then leave only **Learn** checked when you move on.
+3. Click **Scan selected folders**. Both choices include subfolders by default, and you can change either choice for a subfolder. The scan reads your files in place.
+4. Open **Faces** to review the results. To detect faces in another batch later, mark it for identification and scan again.
+
+If a Bridge or Lightroom `Keywords.txt` export is at the root, it supplies the starting vocabulary. Otherwise, in a staged library, scanning reads vocabulary from photos in folders marked **Learn**. Metadata from any indexed photo remains visible on that photo.
+
+If you want the app to copy in photos from somewhere else, use **Add photos** and choose or drop the files. They go into `Imported/<today>/` under the library root. In a staged library, enable **Identify** there when you want to scan that batch for faces.
 
 **What's read from the photo:**
 - **Keywords** become chips on the photo. A keyword that matches an existing one is linked to it, e.g. `Mary White` → `People|MaryWhite`. New ones go under *Other Keywords*.
@@ -64,7 +72,9 @@ A grid of every photo, with its date and a **named/faces** badge (e.g. `2/3`).
 Everyone who appears in your photos, with photo and face counts.
 
 - Tick **Include everyone in the keyword list** to also show people who are in the keyword list but not yet in any photo.
-- **+ Add person** creates someone new.
+- **Find or create a person…** finds existing people by name or keyword. Choosing a new person opens a form for the parent person group/path and exact keyword spelling. CamelCase is suggested; review the full path before creating.
+- Names in the chooser show their exact metadata keyword paths underneath. Readable names can contain spaces while the keywords keep their original spelling.
+- Open a person → **Keywords for face confirmations** to choose one or several keywords to write on future face confirmations. Saving choices does not rewrite existing photos. Add a missing person group in Library first.
 - **Open a person** to:
   - Set **birth/death years**. The app then won't suggest them in photos dated outside their lifetime.
   - Review their **suggested faces**: select the wrong ones, reject them, and confirm the rest.
@@ -76,11 +86,19 @@ Everyone who appears in your photos, with photo and face counts.
   - On the **Tree** page, **Branch keywords** writes `Family|Quill`, `Family|Harcourt`... into the photos so a family can be searched in Bridge. A person gets the branch of every top ancestor they descend from, so a child of two families has both. A married-in partner keeps their own branch (so Jennifer Driver stays `Quill`). Review the preview, then click **Write branch keywords to photos**. After that first time, naming a person on a photo updates that photo's branch keywords automatically; re-run the button after changing family links. A married-in partner (like a husband outside the curator's family) gets only their own branch; the blood relative gets both. `pm strip` removes them.
   - Choose a **cover** face, **merge** two people who are really the same person, or delete a person.
 
-**Deleting a mistake keyword** (e.g. a stray "Jenni"): if a person was created by mistake, open them and click **Delete person**; their unused keywords go with them. Any other keyword that is on no photo appears under **Library → Unused keywords** with a × to delete it. A keyword that is on photos must first be removed from those photos.
+**Deleting a mistake keyword** (e.g. a stray "Jenni"): if a person was created by mistake, open them and click **Delete person**; their unused keywords go with them. Any other keyword that is on no photo appears under **Keywords → Unused keywords** with a × to delete it. A keyword that is on photos must first be removed from those photos.
 
 ---
 
 ## 5. Faces page
+
+Use **Thumbnail size** to resize faces in the review grids. Your browser remembers
+the size; it does not affect recognition or clustering.
+
+In **Unclustered**, sort by **Suggested name** to review similar guesses together.
+Check faces with correct guesses and click **Accept guesses**.
+Each face keeps its own suggested name. **Name** assigns the same person to the
+whole selection. Accepting guesses writes keywords using the usual sharing rules.
 
 **Possible faces** (shown first, when there are any): the app looks hard for faces, including tilted, small and faded ones. That also turns up things that aren't faces, like wheels, lamps or hands.
 - Select the real ones and click **✓ Face**, or select the rest and click **✗ Not a face**. With nothing selected, the buttons apply to all of them.
@@ -118,20 +136,22 @@ Faces that haven't been confirmed yet, grouped into **clusters** of faces that l
 | Enlarged pass | On | Looks again at a larger size. Helps with small faces in group photos. Thorough mode only. |
 | Rotated passes | On | Looks again with the photo turned. Finds tilted or lying-down heads. |
 | **Suggestion threshold** | 0.35 | How alike a face must be to a known person before their name is suggested. Higher means fewer but safer suggestions. |
-| **Name from keywords** | Off | A photo keyworded with one person that shows one face: confirm that face without review. Off, the face is only suggested from the keyword and you confirm in bulk. |
+| **Name from keywords** | On | Automatically confirm a single face when the photo has one tagged person, or the last match when your confirmations leave one face and one tagged person unmatched. |
 | **Minimum cluster size** | 3 | The smallest group of look-alike faces shown as a cluster on the Faces page. |
 | **Pre-select likely non-faces** | On | On the Faces page, pre-select possible faces that look like earlier *Not a face* answers. |
 
-- Detection settings apply to photos scanned **from now on**. To re-check photos already scanned, run `uv run pm ingest <library folder> --rescan`. Existing faces and names are kept.
+- Detection settings apply to photos scanned **from now on**. In **Library → Photo folders**, click **Re-scan for faces** on a folder to re-check indexed photos in that folder and its subfolders where **Identify faces in this folder** is on. Existing face labels and crops are kept. From Terminal, `uv run pm --library "<library root>" ingest "<folder to rescan>" --rescan-empty` re-checks photos with no face detections.
 - Changing the threshold, *Name from keywords* or the cluster size updates suggestions and clusters straight away.
 - **About this library** shows the library folder, where the app keeps its database, and whether face detection is using the graphics card (`CUDAExecutionProvider`) or not (`CPUExecutionProvider`).
 
 ---
 
 ## How the app learns
-- When a photo has **one person keyword and one face**, that face is *suggested* from the keyword, and you confirm the suggestions in bulk. Turning on **Name from keywords** in **Settings** skips that review; it is off by default.
-- In a photo with several people keywords, faces are matched only against those people. If one face and one name are left over, the name is suggested "by elimination".
+- Existing person names are used whether they appear as grouped keywords (`People|AnnExample`) or matching flat keywords (`AnnExample`, `ann example`). The app looks across the imported photos and keyword vocabulary, so the order photos are read doesn't matter. Unrecognized keywords remain ordinary keywords; a tag is not assumed to be a person just because a photo has a face.
+- When a photo has **one person keyword and one face**, that face is named automatically. This is the only time the app names a face without asking, and it can be turned off in **Settings**.
+- In a photo with several people keywords, faces are matched against those people. When your manual confirmations leave exactly one face and one tagged person unmatched, **Name from keywords** confirms the last match. Other matches by elimination remain suggestions.
 - Every name you confirm improves future suggestions. Rejections are remembered too.
+- Matching faces in photos without that person's keyword are suggested in the existing People, Faces and photo views. Confirming them writes the person's existing keyword to the photo; a suggestion alone does not change the file. You can type either `AnnExample` or `Ann Example` in the naming box.
 - Your **Face / Not a face** answers on possible faces teach the app what a false detection looks like, so later possible faces are sorted and pre-selected for you.
 
 ## What the app changes in your files
@@ -139,3 +159,14 @@ Faces that haven't been confirmed yet, grouped into **clusters** of faces that l
 - The app records what it changed, so it can be undone: `uv run pm strip` removes everything the app added and restores the previous values.
 - It never removes keywords that were already in a file unless you confirm.
 - It never touches a Lightroom catalog.
+
+### Keyword compatibility and undo
+Confirming faces writes the selected full paths to XMP `lr:hierarchicalSubject` and leaf names to XMP `dc:subject` and IPTC Keywords. IPTC Keywords are created even on photos without an IPTC record. Each app-added keyword is tracked; undoing it preserves pre-existing keyword values.
+
+## Scan families, scan variants, and keyword sharing
+
+Use **Library → Scan families and filename conventions** to define scan suffixes,
+preview related files, and choose the displayed and recognition fronts. The FastFoto
+preset is editable. Use **Keywords → Where keywords apply** for hierarchy defaults and individual
+keyword rules, and the photo page for exceptions. **Keyword review** lists differences
+after scans and when you click **Review keyword differences for rule violations**. Select fixes before applying metadata changes. See [Scan families, scan variants, and keyword sharing](PHOTO_VERSIONS.md) for the full workflow.

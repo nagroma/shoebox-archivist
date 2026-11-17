@@ -1,5 +1,9 @@
+import { Link } from 'react-router-dom'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { api, type Facet, type Keyword, type FolderListing, type LibraryInfo, type ProposedFacet, type RegroupPlan, type ScanState, type UnmappedGroup } from '../api'
+import { api, faceRescanSummary, scanProgressText, type Facet, type FolderEntry, type FolderFlag, type FolderListing, type FolderTree, type IngestState, type LibraryInfo, type ProposedFacet, type ScanState } from '../api'
+import { ScanFamilySettings } from '../components/VariationSettings'
+import { useApp } from '../state'
+import { localPathFromUrl } from '../folderPath'
 
 const KIND_HELP: Record<string, string> = {
   person: 'people (linked to faces)', event: 'events', place: 'places', subject: 'subjects',
@@ -12,26 +16,55 @@ function FolderPicker({ onPick }: { onPick: (folder: string) => void }) {
   const [typed, setTyped] = useState('')
   const [error, setError] = useState('')
 
-  const go = useCallback(async (path: string) => {
+  const [loading, setLoading] = useState(false)
+  const request = useRef(0)
+  const isMac = /Mac/i.test(navigator.platform)
+
+  const go = useCallback(async (value: string) => {
+    const path = localPathFromUrl(value) ?? value
+    const id = ++request.current
+    setTyped(path)
+    setLoading(true)
+    setError('')
     try {
-      const l = await api.listFolder(path)
-      setListing(l); setTyped(l.path); setError('')
-    } catch (e) { setError((e as Error).message) }
+      const next = await api.listFolder(path)
+      if (id !== request.current) return
+      setListing(next)
+      setTyped('')
+    } catch (e) {
+      if (id === request.current) setError((e as Error).message)
+    } finally {
+      if (id === request.current) setLoading(false)
+    }
   }, [])
 
-  useEffect(() => { go('') }, [go])
+  useEffect(() => { void go('') }, [go])
 
+  const icloud = listing?.icloud
+  const canUse = !!listing?.path && !typed && !loading && !error
   return (
     <div className="folder-picker">
-      <div className="row">
-        <input className="grow" value={typed} placeholder="Folder with your photos, e.g. D:\Photos"
-          onChange={e => setTyped(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') go(typed) }} />
-        <button onClick={() => go(typed)}>Go</button>
-        <button className="primary" disabled={!listing?.path} onClick={() => listing && onPick(listing.path)}>
-          Use this folder
-        </button>
+      <div className="folder-path-field">
+        <label htmlFor="library-folder-path">Drag your photo folder into this field</label>
+        <form className="row wrap" onSubmit={event => { event.preventDefault(); void go(typed) }}>
+          <input autoComplete="off" id="library-folder-path" className="grow" value={typed} placeholder="Or paste the full folder path"
+            aria-describedby="library-folder-help" onChange={event => {
+              request.current++
+              setLoading(false)
+              setError('')
+              setTyped(event.target.value)
+            }} />
+          <button type="submit" disabled={loading}>Go</button>
+          <button type="button" className="primary" disabled={!canUse} onClick={() => listing && onPick(listing.path)}>
+            Use this folder
+          </button>
+        </form>
+        <p className="muted small" id="library-folder-help">{isMac
+          ? 'Or copy the folder path in Finder with Option–Command–C and paste it here. Click Go to browse the folder.'
+          : 'Or paste the full folder path here. Click Go to browse the folder.'}</p>
       </div>
-      {error && <p className="hint error">{error}</p>}
+      {icloud && <button type="button" className="ghost" onClick={() => go(icloud)}>Browse iCloud Drive</button>}
+      {error && <p className="hint error" role="alert">{error}</p>}
       {listing && (
         <>
           <p className="muted small">
@@ -58,6 +91,7 @@ function FolderPicker({ onPick }: { onPick: (folder: string) => void }) {
 function NewLibrary({ info }: { info: LibraryInfo }) {
   const [folder, setFolder] = useState<string | null>(null)
   const [scan, setScan] = useState<ScanState | null>(null)
+  const [staged, setStaged] = useState(true)
   const [preset, setPreset] = useState('auto')
   const [facets, setFacets] = useState<ProposedFacet[] | null>(null)
   const [useKeywords, setUseKeywords] = useState(true)
@@ -78,15 +112,23 @@ function NewLibrary({ info }: { info: LibraryInfo }) {
   async function choose(path: string) {
     setError(''); setScan(null); setFacets(null); setFolder(path); setPreset('auto')
     try {
-      const s = await api.inspectFolder(path)
+      const s = await api.inspectFolder(path, staged, 'auto')
       setScan(s)
-      if (!s.existing) poll(preset)
+      if (s.preset) setPreset(s.preset)
+      if (s.facets) setFacets(s.facets)
+      else if (!s.existing) void poll('auto').catch(e => setError((e as Error).message))
     } catch (e) { setError((e as Error).message); setFolder(null) }
   }
 
   async function changePreset(p: string) {
     setPreset(p)
-    if (scan?.result) poll(p)
+    if (!folder) return
+    try {
+      if (staged) {
+        const next = await api.inspectFolder(folder, true, p)
+        setScan(next); setFacets(next.facets ?? null)
+      } else if (scan?.result) await poll(p)
+    } catch (e) { setError((e as Error).message) }
   }
 
   const setFacet = (i: number, patch: Partial<Facet>) =>
@@ -96,35 +138,41 @@ function NewLibrary({ info }: { info: LibraryInfo }) {
     if (!folder || !facets) return
     setBusy(true); setError('')
     try {
-      await api.createLibrary(folder, facets.map(f => ({ name: f.name, kind: f.kind })), useKeywords, curator)
-      window.location.assign('/photos')
+      await api.createLibrary(folder, facets.map(f => ({ name: f.name, kind: f.kind })), useKeywords, curator, staged)
+      window.location.assign('/library')
     } catch (e) { setError((e as Error).message); setBusy(false) }
   }
 
   async function open() {
     if (!folder) return
     setBusy(true)
-    try { await api.openLibrary(folder); window.location.assign('/photos') }
+    try { await api.openLibrary(folder); window.location.assign('/library') }
     catch (e) { setError((e as Error).message); setBusy(false) }
   }
 
   const r = scan?.result
   return (
     <section className="card">
-      <h2>{info.open ? 'Open or create another library' : 'Create a library'}</h2>
+      <h2>Open or create a library</h2>
       <p className="muted small">
         A library is a folder of photos. The app keeps its own data in a <code>.shoebox</code> folder inside it;
         your photos are only changed when you name a face or edit a keyword, date or caption.
       </p>
 
-      {!folder && <FolderPicker onPick={choose} />}
+      {!folder && <>
+        <label className="row">
+          <input type="checkbox" checked={staged} onChange={e => setStaged(e.target.checked)} />
+          Choose which folders to scan after creating the library
+        </label>
+        <FolderPicker onPick={choose} />
+      </>}
       {error && <p className="hint error">{error}</p>}
 
       {folder && (
         <>
           <div className="row">
             <b className="grow" style={{ wordBreak: 'break-all' }}>{folder}</b>
-            <button onClick={() => { setFolder(null); setScan(null); setFacets(null) }} disabled={busy}>Change folder</button>
+            <button onClick={() => { window.clearTimeout(timer.current); setFolder(null); setScan(null); setFacets(null) }} disabled={busy || !scan || scan.running}>Change folder</button>
           </div>
 
           {scan?.existing && (
@@ -145,17 +193,19 @@ function NewLibrary({ info }: { info: LibraryInfo }) {
 
           {scan?.error && <p className="hint error">{scan.error}</p>}
 
-          {r && facets && (
+          {(r || scan?.staged) && facets && (
             <div className="job">
-              <p>
+              {r ? <p>
                 <b>{r.images}</b> photo(s) found; <b>{r.with_keywords}</b> already have keywords
                 ({r.n_paths} hierarchical, {r.n_flat} flat).
-                {r.images > 0 && r.with_keywords === 0 && <> This will be an <b>empty</b> keyword set; it grows as you work.</>}
-              </p>
+              </p> : <p>{scan?.keyword_file
+                ? 'Keywords.txt at the library root will supply the starting vocabulary.'
+                : 'The vocabulary will grow from photo metadata in folders you choose to learn from.'}</p>}
+              {scan?.staged && !scan.keyword_file && <p className="muted small">If your photos already have a custom top-level group for people, add it below and set its kind to person.</p>}
 
               <div className="field-block">
                 <label className="muted small" htmlFor="curator">Who is curating this library? (your full name)</label>
-                <input id="curator" value={curator} placeholder="e.g. Jane Quill" style={{ width: '100%', maxWidth: 360 }}
+                <input autoComplete="off" id="curator" value={curator} placeholder="e.g. Jane Morgan" style={{ width: '100%', maxWidth: 360 }}
                   onChange={e => setCurator(e.target.value)} />
                 <p className="muted small">
                   The family is organised around you: generations, sides of the family and relationships
@@ -177,11 +227,11 @@ function NewLibrary({ info }: { info: LibraryInfo }) {
               </div>
 
               <table className="facets">
-                <thead><tr><th>Top-level keyword group (facet)</th><th>Kind</th><th>Examples</th><th>In photos</th><th /></tr></thead>
+                <thead><tr><th>Top-level keyword group (facet)</th><th>Kind</th><th>Examples</th><th>{staged ? "In Keywords.txt" : "In photos"}</th><th /></tr></thead>
                 <tbody>
                   {facets.map((f, i) => (
                     <tr key={i}>
-                      <td><input value={f.name} onChange={e => setFacet(i, { name: e.target.value })} /></td>
+                      <td><input autoComplete="off" value={f.name} onChange={e => setFacet(i, { name: e.target.value })} /></td>
                       <td>
                         <select value={f.kind} onChange={e => setFacet(i, { kind: e.target.value })}>
                           {info.kinds.map(k => <option key={k} value={k}>{k} – {KIND_HELP[k] ?? ''}</option>)}
@@ -206,7 +256,7 @@ function NewLibrary({ info }: { info: LibraryInfo }) {
                 + Add facet
               </button>
 
-              {r.n_paths > 0 && (
+              {r && r.n_paths > 0 && (
                 <>
                   <label className="row" style={{ marginTop: 8 }}>
                     <input type="checkbox" checked={useKeywords} onChange={e => setUseKeywords(e.target.checked)} />
@@ -220,7 +270,7 @@ function NewLibrary({ info }: { info: LibraryInfo }) {
                   </details>
                 </>
               )}
-              {r.n_flat > 0 && (
+              {r && r.n_flat > 0 && (
                 <details>
                   <summary className="muted small">{r.n_flat} flat keyword(s) found (no group; filed under "Other Keywords" until you move them)</summary>
                   <ul className="kw-found">
@@ -231,9 +281,9 @@ function NewLibrary({ info }: { info: LibraryInfo }) {
 
               <div className="action-bar">
                 <button className="primary" onClick={create} disabled={busy || facets.some(f => !f.name.trim())}>
-                  {busy ? 'Creating…' : 'Create library and import photos'}
+                  {busy ? 'Creating…' : staged ? 'Create library' : 'Create library and scan photos'}
                 </button>
-                <span className="muted small">Face detection starts right away (about 1 second per photo).</span>
+                <span className="muted small">{staged ? 'Choose folders to scan on the Library page.' : 'Face detection starts right away.'}</span>
               </div>
             </div>
           )}
@@ -244,182 +294,11 @@ function NewLibrary({ info }: { info: LibraryInfo }) {
 }
 
 /** Facets, Keywords.txt export and reset for the open library. */
-/** Keywords on no photo: mistakes, or vocabulary entries nobody used. */
-/** Family-name groups (Ashdown|JuliaAshdown) -> People|JuliaAshdown + Family|Ashdown. Preview, then one click. */
-function FamilyGroups({ reload }: { reload: () => void }) {
-  const [groups, setGroups] = useState<{ name: string; kind: string; keywords: number }[]>([])
-  const [picked, setPicked] = useState<string[]>([])
-  const [plan, setPlan] = useState<RegroupPlan | null>(null)
-  const [busy, setBusy] = useState(false)
-  const [msg, setMsg] = useState('')
-  const [error, setError] = useState('')
-
-  const load = useCallback(() => { api.regroupGroups().then(setGroups).catch(() => setGroups([])) }, [])
-  useEffect(load, [load])
-  if (!groups.length && !msg) return null
-
-  async function preview(next: string[]) {
-    setPicked(next); setPlan(null); setError(''); setMsg('')
-    if (!next.length) return
-    try { setPlan(await api.regroupPlan(next)) } catch (e) { setError((e as Error).message) }
-  }
-
-  async function apply() {
-    setBusy(true); setError('')
-    try {
-      const r = await api.regroupApply(picked)
-      setMsg(`Converted ${r.converted} keywords on ${r.photos} photos` + (r.failed ? ` (${r.failed} failed)` : '') +
-        '. `pm strip` undoes it.')
-      setPlan(null); setPicked([]); load(); reload()
-    } catch (e) { setError((e as Error).message) } finally { setBusy(false) }
-  }
-
-  return (
-    <section className="card">
-      <h2>Family-name groups</h2>
-      <p className="muted small">
-        Groups like <code>Ashdown|JuliaAshdown</code> name people under a family. Tick the groups that are family names;
-        each keyword becomes <code>People|JuliaAshdown</code> plus <code>Family|Ashdown</code> in the photo files.
-        Nothing changes until you confirm the preview, and <code>pm strip</code> puts the old keywords back.
-      </p>
-      <div className="row">
-        {groups.map(g => (
-          <label key={g.name} className="row small">
-            <input type="checkbox" checked={picked.includes(g.name)}
-              onChange={e => preview(e.target.checked ? [...picked, g.name] : picked.filter(x => x !== g.name))} />
-            {g.name} <span className="muted">({g.keywords})</span>
-          </label>
-        ))}
-      </div>
-      {plan && (
-        <>
-          {plan.groups.map(g => (
-            <details key={g.group} open={plan.groups.length === 1}>
-              <summary>{g.group} &rarr; {plan.people_category}|&lt;name&gt; + {g.family_keyword}
-                {' '}<span className="muted">({g.people.length} people)</span></summary>
-              <table className="facets"><tbody>
-                {g.people.map(p => (
-                  <tr key={p.name}><td>{p.display}</td><td className="muted">{p.photos} photos</td>
-                    <td className="muted">{p.merges_existing ? `joins existing ${p.to}` : p.to}</td></tr>
-                ))}
-              </tbody></table>
-              {g.skipped_deeper > 0 && <p className="muted small">{g.skipped_deeper} deeper keywords are left alone.</p>}
-            </details>
-          ))}
-          <div className="row">
-            <span className="grow muted small">{plan.keywords} keywords on {plan.photos} photos will change.</span>
-            <button className="primary" disabled={busy} onClick={apply}>
-              {busy ? 'Converting…' : `Convert ${plan.photos} photos`}
-            </button>
-          </div>
-        </>
-      )}
-      {msg && <p className="hint">{msg}</p>}
-      {error && <p className="hint error">{error}</p>}
-    </section>
-  )
-}
-
-/** Keyword groups that arrived with later photos and match no facet: add as a facet, or leave. */
-function NewGroups({ reload, kinds }: { reload: () => void; kinds: string[] }) {
-  const [groups, setGroups] = useState<UnmappedGroup[]>([])
-  const [kind, setKind] = useState<Record<string, string>>({})
-  const [error, setError] = useState('')
-  useEffect(() => { api.unmappedGroups().then(setGroups).catch(() => setGroups([])) }, [])
-  if (!groups.length) return null
-
-  async function resolve(g: UnmappedGroup, action: 'facet' | 'leave') {
-    setError('')
-    try {
-      setGroups(await api.resolveGroup(g.name, action, kind[g.name] ?? (g.looks_like_people ? 'person' : g.kind)))
-      if (action === 'facet') reload()
-    } catch (e) { setError((e as Error).message) }
-  }
-
-  return (
-    <section className="card">
-      <h2>New keyword groups</h2>
-      <p className="muted small">
-        These groups came in with newly added photos and are not facets yet. Adding one only tells the app what
-        it is; the keywords in your files are not changed. Leaving one alone hides it here.
-      </p>
-      <table className="facets">
-        <tbody>
-          {groups.map(g => (
-            <tr key={g.name}>
-              <td><strong>{g.name}</strong> <span className="muted small">({g.keywords} keywords, {g.photos} photos)</span>
-                <div className="muted small">{g.samples.join(', ')}</div></td>
-              <td>
-                <select value={kind[g.name] ?? (g.looks_like_people ? 'person' : g.kind)}
-                  onChange={e => setKind({ ...kind, [g.name]: e.target.value })}>
-                  {kinds.map(k => <option key={k} value={k}>{k}</option>)}
-                </select>
-              </td>
-              <td className="row">
-                <button className="primary" onClick={() => resolve(g, 'facet')}>Add as facet</button>
-                <button className="ghost" onClick={() => resolve(g, 'leave')}>Leave</button>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      {error && <p className="hint error">{error}</p>}
-    </section>
-  )
-}
-
-function UnusedKeywords() {
-  const [list, setList] = useState<Keyword[] | null>(null)
-  const [error, setError] = useState('')
-  const load = useCallback(() => {
-    api.keywords().then(ks => setList(ks.filter(k => !k.photos))).catch(e => setError((e as Error).message))
-  }, [])
-  useEffect(() => { load() }, [load])
-  if (!list?.length) return null
-  async function del(k: Keyword) {
-    try { await api.deleteKeyword(k.id); load() } catch (e) { setError((e as Error).message) }
-  }
-  return (
-    <section className="card">
-      <h2>Unused keywords <span className="muted">({list.length})</span></h2>
-      <p className="muted small">Keywords on no photo. Delete mistakes; this doesn't touch any photo file.</p>
-      <div className="kw-found">
-        {list.map(k => (
-          <span key={k.id} className={`kw ${k.kind}`} title={k.category}>
-            {k.name} <button onClick={() => del(k)} title="Delete">×</button>
-          </span>
-        ))}
-      </div>
-      {error && <p className="hint error">{error}</p>}
-    </section>
-  )
-}
-
 function CurrentLibrary({ info, reload }: { info: LibraryInfo; reload: () => void }) {
-  const [facets, setFacets] = useState<(Facet & { keywords?: number })[]>(info.facets ?? [])
+  const [curator, setCurator] = useState(info.curator?.name ?? '')
   const [msg, setMsg] = useState('')
   const [error, setError] = useState('')
-  const [confirm, setConfirm] = useState('')
-  const [curator, setCurator] = useState(info.curator?.name ?? '')
-  const dirty = JSON.stringify(facets.map(f => [f.name, f.kind])) !==
-    JSON.stringify((info.facets ?? []).map(f => [f.name, f.kind]))
-
-  async function save() {
-    setError(''); setMsg('')
-    try {
-      await api.saveFacets(facets.map(f => ({ name: f.name, kind: f.kind })))
-      setMsg('Saved'); reload()
-    } catch (e) { setError((e as Error).message) }
-  }
-
-  async function reset() {
-    setError('')
-    try { await api.resetLibrary(confirm); window.location.assign('/library') }
-    catch (e) { setError((e as Error).message) }
-  }
-
   return (
-    <>
       <section className="card">
         <h2>Current library</h2>
         <dl>
@@ -429,7 +308,7 @@ function CurrentLibrary({ info, reload }: { info: LibraryInfo; reload: () => voi
         <div className="field-block">
           <label className="muted small" htmlFor="curator-now">Curator (the person this family tree is measured from)</label>
           <div className="row">
-            <input id="curator-now" value={curator} placeholder="Full name" onChange={e => setCurator(e.target.value)} />
+            <input autoComplete="off" id="curator-now" value={curator} placeholder="Full name" onChange={e => setCurator(e.target.value)} />
             <button disabled={curator.trim() === (info.curator?.name ?? '')}
               onClick={async () => {
                 try { await api.setCurator(curator); setMsg('Curator saved'); reload() }
@@ -438,53 +317,25 @@ function CurrentLibrary({ info, reload }: { info: LibraryInfo; reload: () => voi
           </div>
         </div>
         <div className="row">
-          <button onClick={async () => { await api.closeLibrary(); window.location.assign('/library') }}>Close library</button>
+          <button onClick={async () => { try { await api.closeLibrary(); window.location.assign('/library') } catch (e) { setError((e as Error).message) } }}>Close library</button>
         </div>
+        {msg && <p className="hint" role="status">{msg}</p>}
+        {error && <p className="hint error" role="alert">{error}</p>}
       </section>
 
-      <section className="card">
-        <h2>Keyword facets</h2>
-        <p className="muted small">
-          Top-level keyword groups for this library. Keywords are stored in the photos as Bridge / Lightroom
-          hierarchical keywords (<code>Facet|Group|Keyword</code>). A facet can only be removed or retyped
-          from/to <i>person</i> while it has no keywords.
-        </p>
-        <table className="facets">
-          <thead><tr><th>Facet</th><th>Kind</th><th>Keywords</th><th /></tr></thead>
-          <tbody>
-            {facets.map((f, i) => (
-              <tr key={i}>
-                <td><input value={f.name} disabled={!!f.keywords}
-                  onChange={e => setFacets(fs => fs.map((x, j) => j === i ? { ...x, name: e.target.value } : x))} /></td>
-                <td>
-                  <select value={f.kind}
-                    onChange={e => setFacets(fs => fs.map((x, j) => j === i ? { ...x, kind: e.target.value } : x))}>
-                    {info.kinds.concat(info.kinds.includes(f.kind) ? [] : [f.kind]).map(k => <option key={k}>{k}</option>)}
-                  </select>
-                </td>
-                <td className="muted">{f.keywords ?? 0}</td>
-                <td><button className="ghost" disabled={!!f.keywords} title="Remove"
-                  onClick={() => setFacets(facets.filter((_, j) => j !== i))}>×</button></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        <div className="row">
-          <button className="ghost" onClick={() => setFacets([...facets, { name: '', kind: 'other' }])}>+ Add facet</button>
-          <span className="grow" />
-          <a href="/api/keywords/export" download="Keywords.txt">Export Keywords.txt (for Bridge / Lightroom)</a>
-          <button className="primary" disabled={!dirty} onClick={save}>Save facets</button>
-        </div>
-        {msg && <p className="hint">{msg}</p>}
-        {error && <p className="hint error">{error}</p>}
-      </section>
+  )
+}
 
-      <NewGroups reload={reload} kinds={info.kinds} />
-      <FamilyGroups reload={reload} />
+function ResetLibrary() {
+  const [confirm, setConfirm] = useState('')
+  const [error, setError] = useState('')
+  async function reset() {
+    setError('')
+    try { await api.resetLibrary(confirm); window.location.assign('/library') }
+    catch (e) { setError((e as Error).message) }
+  }
 
-      <UnusedKeywords />
-
-      {info.managed && (
+  return (
         <section className="card danger-zone">
           <h2>Reset this library</h2>
           <p className="muted small">
@@ -494,26 +345,187 @@ function CurrentLibrary({ info, reload }: { info: LibraryInfo; reload: () => voi
             (<code>pm strip</code> removes them from the files first, if you want a clean start.)
           </p>
           <div className="row">
-            <input value={confirm} placeholder="Type reset to confirm" onChange={e => setConfirm(e.target.value)} />
+            <input autoComplete="off" value={confirm} placeholder="Type reset to confirm" onChange={e => setConfirm(e.target.value)} />
             <button className="danger" disabled={confirm !== 'reset'} onClick={reset}>Reset library</button>
           </div>
+          {error && <p className="hint error" role="alert">{error}</p>}
         </section>
-      )}
-    </>
   )
 }
 
-export function LibraryPage({ info, reload }: { info: LibraryInfo; reload: () => void }) {
+const folderFlags: { key: FolderFlag; label: string }[] = [
+  { key: 'learn', label: 'Learn from this folder' },
+  { key: 'identify', label: 'Identify faces in this folder' },
+]
+
+function parentPath(path: string) {
+  return path.substring(0, path.lastIndexOf('/'))
+}
+
+function FolderTable({ entries, busy, choose, rescan }: {
+  entries: FolderEntry[]
+  busy: boolean
+  choose: (path: string, flag: FolderFlag, enabled: boolean) => void
+  rescan: (path: string) => void
+}) {
+  const [expanded, setExpanded] = useState(() => new Set(['']))
+  const byPath = new Map(entries.map(entry => [entry.path, entry]))
+  const children = new Set<string>()
+  const mixed = new Map<string, Set<FolderFlag>>()
+  const rescanPaths = new Set(entries.filter(entry => entry.identify && entry.fronts > 0).map(entry => entry.path))
+  for (const { path } of [...entries].reverse()) {
+    if (!path) continue
+    const parent = parentPath(path)
+    children.add(parent)
+    if (rescanPaths.has(path)) rescanPaths.add(parent)
+    const entry = byPath.get(path)!
+    const parentEntry = byPath.get(parent)!
+    for (const { key } of folderFlags) {
+      if (entry[key] === parentEntry[key] && !mixed.get(path)?.has(key)) continue
+      if (!mixed.has(parent)) mixed.set(parent, new Set())
+      mixed.get(parent)!.add(key)
+    }
+  }
+  const visible = new Set<string>()
   return (
-    <div className="page settings">
-      <header className="page-head">
-        <div>
-          <h1>{info.open ? 'Library' : 'Welcome to Shoebox Archivist'}</h1>
-          {!info.open && <p className="muted">Choose the folder that holds your photos to get started.</p>}
-        </div>
-      </header>
-      {info.open && <CurrentLibrary info={info} reload={reload} />}
-      <NewLibrary info={info} />
+    <div className="table-scroll">
+      <table className="facets folder-scope">
+        <thead><tr><th>Folder</th>{folderFlags.map(({ key, label }) => <th key={key}>{label}</th>)}<th>Status</th></tr></thead>
+        <tbody>
+          {entries.map(entry => {
+            const { path, name, indexed, fronts, scanned } = entry
+            if (path && (!visible.has(parentPath(path)) || !expanded.has(parentPath(path)))) return null
+            visible.add(path)
+            const depth = path ? path.split('/').length : 0
+            return <tr key={path}>
+              <th scope="row">
+                <div className="folder-name" style={{ '--folder-depth': depth } as React.CSSProperties}>
+                  {children.has(path) ? <button className="ghost folder-toggle" aria-expanded={expanded.has(path)}
+                    aria-label={`${expanded.has(path) ? 'Collapse' : 'Expand'} ${name}`}
+                    onClick={() => setExpanded(current => {
+                      const next = new Set(current)
+                      if (next.has(path)) next.delete(path); else next.add(path)
+                      return next
+                    })} /> : <span className="folder-toggle" />}
+                  <span className="folder-name-label">{name}</span>
+                </div>
+              </th>
+              {folderFlags.map(({ key, label }) => {
+                const partial = mixed.get(path)?.has(key) ?? false
+                return <td key={key}>
+                  <input type="checkbox" aria-label={`${label} — ${path || name}`}
+                    ref={node => { if (node) node.indeterminate = partial }}
+                    checked={entry[key]} disabled={busy}
+                    onChange={e => choose(path, key, partial || e.target.checked)} />
+                </td>
+              })}
+              <td className="muted">
+                <div className="folder-status">
+                  <span className="folder-status-text">{indexed ? `${indexed} indexed · ${scanned}/${fronts} fronts scanned` : 'Not indexed'}</span>
+                  {rescanPaths.has(path) && <button className="small folder-rescan" disabled={busy}
+                    aria-label={`Re-scan for faces in ${path || name}`} onClick={() => rescan(path)}>Re-scan for faces</button>}
+                </div>
+              </td>
+            </tr>
+          })}
+        </tbody>
+      </table>
     </div>
   )
+}
+
+function FolderScope({ reload }: { reload: () => void }) {
+  const { refresh } = useApp()
+  const [tree, setTree] = useState<FolderTree | null>(null)
+  const [job, setJob] = useState<IngestState>({ running: false })
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const wasRunning = useRef(false)
+  const refreshTree = useCallback(() => {
+    api.folders().then(setTree).catch(e => setError((e as Error).message))
+  }, [])
+  useEffect(() => {
+    refreshTree()
+    window.addEventListener('library-changed', refreshTree)
+    return () => window.removeEventListener('library-changed', refreshTree)
+  }, [refreshTree])
+  useEffect(() => {
+    let cancelled = false
+    async function poll() {
+      try {
+        const next = await api.ingestStatus()
+        if (cancelled) return
+        if (wasRunning.current && !next.running) {
+          refresh()
+          window.dispatchEvent(new Event('library-changed'))
+        }
+        wasRunning.current = next.running
+        setJob(next)
+      } catch (e) {
+        if (!cancelled) setError((e as Error).message)
+      }
+    }
+    void poll()
+    const timer = window.setInterval(poll, 1000)
+    return () => { cancelled = true; window.clearInterval(timer) }
+  }, [refresh])
+
+  async function choose(path: string, flag: FolderFlag, enabled: boolean) {
+    setSaving(true); setError('')
+    try {
+      setTree(await api.chooseFolder(path, flag, enabled))
+      reload()
+      refresh()
+    } catch (e) { setError((e as Error).message) }
+    finally { setSaving(false) }
+  }
+
+  async function scan(path?: string) {
+    setSaving(true); setError('')
+    try {
+      setJob(path === undefined ? await api.ingest() : await api.rescanFolderFaces(path))
+      wasRunning.current = true
+    } catch (e) { setError((e as Error).message) }
+    finally { setSaving(false) }
+  }
+
+  const busy = saving || job.running
+  return <section className="card">
+    <h2>Photo folders</h2>
+    <p><b>Learn</b> uses confirmed faces for future suggestions. <b>Identify</b> finds faces and adds them to the <Link to="/faces">Faces</Link> page.</p>
+    <p className="muted small">Checking a folder sets that choice for its subfolders. You can then change individual subfolders. Counts show files directly in each folder.</p>
+    <p className="muted small">Use <b>Re-scan for faces</b> to check indexed photos again in a folder and its subfolders where <b>Identify</b> is on. Existing face labels and crops are kept.</p>
+    {tree && <>
+      <p className="muted small">{tree.keyword_file
+        ? 'Starting vocabulary comes from Keywords.txt at the library root.'
+        : tree.scoped ? 'Keyword choices include metadata from folders marked Learn.'
+          : 'Keyword choices include metadata from indexed photos.'}</p>
+      <FolderTable entries={tree.folders} busy={busy} choose={choose} rescan={scan} />
+      <div className="action-bar">
+        <button className="primary" disabled={busy || !tree.folders.some(f => f.learn || f.identify)}
+          onClick={() => scan()}>Scan selected folders</button>
+        <span className="muted small">The scan reads your photos in place.</span>
+      </div>
+    </>}
+    {!tree && !error && <p className="muted">Loading folders…</p>}
+    {job.running && <p role="status">{job.rescan_folder && <b>{job.rescan_folder} · </b>}{scanProgressText(job)}</p>}
+    {!job.running && job.result && !error && <p role="status">{job.rescan_folder
+      ? faceRescanSummary(job.rescan_folder, job.result)
+      : `Last scan indexed ${job.result.added} new files and found ${job.result.faces} faces.`}</p>}
+    {(error || job.error) && <p className="hint error" role="alert">{error || job.error}</p>}
+  </section>
+}
+
+export function LibraryPage({ info, reload }: { info: LibraryInfo; reload: () => void }) {
+  return <div className={info.open ? 'page settings library-page' : 'page settings'}>
+    <header className="page-head">
+      <h1>{info.open ? 'Library' : 'Welcome to Shoebox Archivist'}</h1>
+    </header>
+    {info.open ? <>
+      <CurrentLibrary info={info} reload={reload} />
+      <FolderScope reload={reload} />
+      <ScanFamilySettings />
+      {info.managed && <ResetLibrary />}
+    </> : <NewLibrary info={info} />}
+  </div>
 }

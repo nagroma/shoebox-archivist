@@ -1,40 +1,62 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { api, faceThumb, type PersonDetail, type PersonRef, type Relatives } from '../api'
-import { FaceGrid } from '../components/FaceGrid'
+import { api, faceThumb, type PersonDetail, type PersonRef, type PhotoSummary, type Relatives } from '../api'
+import { FaceGrid, FaceThumbnailSizeSlider, PeopleKeywordsCheckbox } from '../components/FaceGrid'
+import { confirmedFacesForDisplay } from '../confirmedFaces'
+import { useFaceThumbnailSize } from '../faceThumbnailSize'
 import { PersonPicker } from '../components/PersonPicker'
+import { keywordSpelling } from '../keywordSpelling'
+import { PersonKeywordForm } from '../components/PersonKeywordForm'
 import { useAction, useApp } from '../state'
+import { PEOPLE_SORT_OPTIONS, loadPeopleSort, rememberPeopleSort, sortPeople, type PeopleSort, type PeopleSortKey } from '../peopleSort'
 
 export function PeoplePage() {
   const { people, refresh } = useApp()
-  const run = useAction()
   const navigate = useNavigate()
   const [filter, setFilter] = useState('')
   const [showAll, setShowAll] = useState(false)
+  const [sort, setSort] = useState(loadPeopleSort)
 
   useEffect(() => { refresh() }, [refresh])
 
-  // Person keywords seeded from the files' vocabulary can outnumber photographed people.
-  const active = people.filter(p => p.photos > 0 || p.confirmed > 0 || p.suggested > 0)
-  const shown = (showAll || filter ? people : active)
+  const sorted = useMemo(() => sortPeople(people, sort), [people, sort])
+  const active = sorted.filter(p => p.photos > 0 || p.confirmed > 0 || p.suggested > 0)
+  const shown = (showAll || filter ? sorted : active)
     .filter(p => p.name.toLowerCase().includes(filter.toLowerCase()) ||
       p.aliases.some(a => a.name.toLowerCase().includes(filter.toLowerCase())))
-    .sort((a, b) => b.photos + b.confirmed - (a.photos + a.confirmed) || a.name.localeCompare(b.name))
+
+  function updateSort(next: PeopleSort) {
+    setSort(next)
+    rememberPeopleSort(next)
+  }
+
+  const ascending = sort.direction === 'asc'
+  const nameSort = sort.key === 'firstName' || sort.key === 'lastName'
+  const orderLabel = nameSort ? (ascending ? 'A–Z' : 'Z–A') : (ascending ? 'Fewest first' : 'Most first')
 
   return (
     <div className="page">
       <header className="page-head">
         <h1>People <span className="muted">({active.length})</span></h1>
-        <div className="row">
+        <div className="row wrap">
+          <label className="row">Sort by
+            <select value={sort.key} onChange={e => {
+              const key = e.target.value as PeopleSortKey
+              updateSort({ key, direction: PEOPLE_SORT_OPTIONS[key].direction })
+            }}>
+              {Object.entries(PEOPLE_SORT_OPTIONS).map(([key, { label }]) =>
+                <option key={key} value={key}>{label}</option>)}
+            </select>
+          </label>
+          <button type="button" aria-label={`Sort order, ${orderLabel}. Reverse sort order`}
+            onClick={() => updateSort({ ...sort, direction: ascending ? 'desc' : 'asc' })}>
+            <span aria-hidden="true">{ascending ? '↑' : '↓'}</span> {orderLabel}
+          </button>
           <label className="small"><input type="checkbox" checked={showAll} onChange={e => setShowAll(e.target.checked)} />
             {' '}Include everyone in the keyword list ({people.length})</label>
-          <input placeholder="Filter…" value={filter} onChange={e => setFilter(e.target.value)} />
-          <button onClick={async () => {
-            const name = prompt('New person name')
-            if (!name?.trim()) return
-            const p = await run(() => api.createPerson(name.trim()))
-            if (p) { await refresh(); navigate(`/people/${p.id}`) }
-          }}>+ Add person</button>
+          <input autoComplete="off" placeholder="Filter…" value={filter} onChange={e => setFilter(e.target.value)} />
+          <PersonPicker buttonLabel="Add" placeholder="Find or create a person…" clearOnPick
+            onPick={who => { if ('person_id' in who) navigate(`/people/${who.person_id}`) }} />
         </div>
       </header>
       {people.length === 0 && <p className="empty">No people yet — name a cluster on the Faces page.</p>}
@@ -43,7 +65,7 @@ export function PeoplePage() {
           <Link key={p.id} to={`/people/${p.id}`} className="person-card">
             {p.cover ? <img src={faceThumb(p.cover)} alt="" /> : <div className="noface">?</div>}
             <div className="name">{p.display_name}</div>
-            {p.relation && <div className="rel small">{p.relation}</div>}
+            {p.relation && <div className="person-relationship rel small">{p.relation}</div>}
             {p.display_name !== p.name && <div className="muted small">born {p.name}</div>}
             <div className="muted small">
               {lifespan(p.birth_year, p.death_year)}
@@ -57,6 +79,37 @@ export function PeoplePage() {
       </div>
     </div>
   )
+}
+
+function PersonKeywordsCard({ person, onSaved }: { person: PersonDetail; onSaved: () => void }) {
+  const run = useAction()
+  const [selected, setSelected] = useState(person.keyword_ids)
+  const [adding, setAdding] = useState(person.keywords.length === 0)
+  const [category, setCategory] = useState('')
+  const [name, setName] = useState(keywordSpelling(person.name))
+  const [saving, setSaving] = useState(false)
+  async function save() {
+    setSaving(true)
+    const r = await run(() => api.savePersonKeywords(person.id, selected,
+      adding ? category : undefined, adding ? name : undefined), 'Keyword choices saved')
+    setSaving(false)
+    if (r) onSaved()
+  }
+  return <section className="card">
+    <h2>Keywords for face confirmations</h2>
+    <p className="muted small">Select the keyword or combination to add when you confirm this person.
+      Saving these choices leaves previously labelled photos as they are.</p>
+    {person.keywords.map(k => <label className="row" key={k.id}>
+      <input type="checkbox" checked={selected.includes(k.id)} onChange={e =>
+        setSelected(e.target.checked ? [...selected, k.id] : selected.filter(id => id !== k.id))} />
+      <code>{k.category}|{k.name}</code>
+    </label>)}
+    <label className="row"><input type="checkbox" checked={adding} onChange={e => setAdding(e.target.checked)} />
+      Add a keyword for this person</label>
+    {adding && <PersonKeywordForm category={category} name={name} onChange={(c, n) => { setCategory(c); setName(n) }} />}
+    <button className="primary" disabled={saving || (adding ? !category.trim() || !name.trim() : !selected.length)}
+      onClick={save}>{saving ? 'Saving…' : 'Save keyword choices'}</button>
+  </section>
 }
 
 /** Other names (married name, nickname). The keyword in the files keeps the main name;
@@ -86,14 +139,14 @@ function AliasCard({ person, onSaved }: { person: PersonDetail; onSaved: () => v
       </p>
       {rows.map((r, i) => (
         <div key={i} className="row" style={{ marginBottom: 6 }}>
-          <input value={r.name} placeholder="Full name" onChange={e => upd(i, { name: e.target.value })} />
+          <input autoComplete="off" value={r.name} placeholder="Full name" onChange={e => upd(i, { name: e.target.value })} />
           <select value={r.kind} onChange={e => upd(i, { kind: e.target.value })}>
             <option value="married">married name</option>
             <option value="birth">birth name</option>
             <option value="nickname">nickname</option>
             <option value="other">other</option>
           </select>
-          <input value={r.from_year} placeholder="used from year" inputMode="numeric" style={{ width: 120 }}
+          <input autoComplete="off" value={r.from_year} placeholder="used from year" inputMode="numeric" style={{ width: 120 }}
             onChange={e => upd(i, { from_year: e.target.value.replace(/\D/g, '') })} />
           <button className="ghost" title="Remove" onClick={() => setRows(rs => rs.filter((_, j) => j !== i))}>×</button>
         </div>
@@ -138,15 +191,18 @@ function FamilyCard({ person, onChanged }: { person: PersonDetail; onChanged: ()
                  former = false) => (
     <div className="family-group">
       <div className="muted small">{title}</div>
-      <div className="row">
+      <div className="row wrap">
         {list.map(r => (
           <span key={r.id} className="kw person">
-            <Link to={`/people/${r.id}`}>{r.name}</Link>
-            {r.relation && <span className="muted small"> {r.relation}</span>}
-            {former && <span className="muted small"> {r.end_year ? `ended ${r.end_year}` : 'ended'}</span>}
+            <Link to={`/people/${r.id}`}>
+              {r.name}
+              {r.relation && <span className="person-relationship muted small">{r.relation}</span>}
+            </Link>
+            {former && <span className="muted small">{r.end_year ? `Ended ${r.end_year}` : 'Ended'}</span>}
             {relation === 'partner' && (
-              <button title={former ? 'Partners again' : 'Mark as a former partner'}
-                onClick={() => endPartnership(r.id, !former)}>{former ? '↺' : 'ended'}</button>
+              <button onClick={() => endPartnership(r.id, !former)}>
+                {former ? 'Mark current' : 'Mark ended'}
+              </button>
             )}
             <button title="Remove link" onClick={() => remove(relation, r.id)}>×</button>
           </span>
@@ -184,20 +240,27 @@ function lifespan(b: number | null, d: number | null) {
   return <>{b ?? '?'}–{d ?? ''} · </>
 }
 
+type FaceReviewAction = 'confirm' | 'reject' | 'ignore'
+type FaceReviewList = 'suggested' | 'confirmed'
+
 export function PersonPage() {
   const { id } = useParams()
   const pid = Number(id)
-  const { refresh } = useApp()
+  const { refresh, showPeopleKeywords, setShowPeopleKeywords } = useApp()
   const run = useAction()
   const navigate = useNavigate()
   const [p, setP] = useState<PersonDetail | null>(null)
+  const [photos, setPhotos] = useState<PhotoSummary[]>([])
   const [form, setForm] = useState({ name: '', birth_year: '', death_year: '', name_from_year: '', notes: '' })
   const [selSugg, setSelSugg] = useState<Set<number>>(new Set())
   const [selConf, setSelConf] = useState<Set<number>>(new Set())
+  const [pendingReview, setPendingReview] = useState<{ action: FaceReviewAction; list: FaceReviewList; count: number } | null>(null)
+  const [thumbnailSize, setThumbnailSize] = useFaceThumbnailSize()
 
   const load = useCallback(async () => {
-    const d = await api.person(pid)
+    const [d, personPhotos] = await Promise.all([api.person(pid), api.photos({ person_id: pid })])
     setP(d)
+    setPhotos(personPhotos)
     setForm({
       name: d.name, birth_year: d.birth_year?.toString() ?? '',
       death_year: d.death_year?.toString() ?? '', name_from_year: d.name_from_year?.toString() ?? '',
@@ -229,6 +292,33 @@ export function PersonPage() {
   }
 
   const suggIds = selSugg.size ? [...selSugg] : p.suggested.map(f => f.id)
+  const confirmed = confirmedFacesForDisplay(p.confirmed, photos)
+  const reviewing = pendingReview !== null
+  const pendingFaces = pendingReview && `${pendingReview.count} ${pendingReview.count === 1 ? 'face' : 'faces'}`
+  const pendingDetections = pendingReview && `${pendingReview.count} ${pendingReview.count === 1 ? 'detection' : 'detections'}`
+  const suggestedAction = pendingReview?.list === 'suggested' ? pendingReview.action : null
+  const confirmedAction = pendingReview?.list === 'confirmed' ? pendingReview.action : null
+  const notPerson = `Not ${p.name}`
+
+  async function reviewFaces(action: FaceReviewAction, list: FaceReviewList, ids: number[]) {
+    if (reviewing || !ids.length) return
+    const count = ids.length
+    const faces = `${count} ${count === 1 ? 'face' : 'faces'}`
+    const operations = {
+      confirm: { request: () => api.assign(ids, { person_id: pid }), message: `Confirmed ${faces}` },
+      reject: { request: () => api.reject(ids), message: list === 'suggested'
+        ? `Rejected ${faces}` : `Removed ${count} ${count === 1 ? 'confirmation' : 'confirmations'}` },
+      ignore: { request: () => api.ignore(ids), message: `Ignored ${count} ${count === 1 ? 'detection' : 'detections'}` },
+    }
+    const { request, message } = operations[action]
+    setPendingReview({ action, list, count })
+    try {
+      const result = await run(request, message)
+      if (result !== undefined) await run(load)
+    } finally {
+      setPendingReview(null)
+    }
+  }
 
   return (
     <div className="page">
@@ -243,47 +333,58 @@ export function PersonPage() {
             {' '}· on {p.keywords.reduce((n, k) => n + k.photos, 0)} photos
           </p>}
         </div>
-        <div className="row">
+        <div className="row wrap">
+          <FaceThumbnailSizeSlider size={thumbnailSize} onChange={setThumbnailSize} />
           <Link to={`/photos?person=${pid}`}><button>View photos</button></Link>
           <Link to={`/tree/${pid}`}><button>Family tree</button></Link>
         </div>
       </header>
 
       <section className="card person-form">
-        <label>Name <input value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} /></label>
-        <label title="Year this name came into use. Leave blank if it was always their name.">Name used from <input value={form.name_from_year} placeholder="year" inputMode="numeric"
+        <label>Name <input autoComplete="off" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} /></label>
+        <label title="Year this name came into use. Leave blank if it was always their name.">Name used from <input autoComplete="off" value={form.name_from_year} placeholder="year" inputMode="numeric"
           onChange={e => setForm({ ...form, name_from_year: e.target.value.replace(/\D/g, '') })} style={{ width: 80 }} /></label>
-        <label>Born <input value={form.birth_year} placeholder="year" inputMode="numeric"
+        <label>Born <input autoComplete="off" value={form.birth_year} placeholder="year" inputMode="numeric"
           onChange={e => setForm({ ...form, birth_year: e.target.value.replace(/\D/g, '') })} style={{ width: 80 }} /></label>
-        <label>Died <input value={form.death_year} placeholder="year" inputMode="numeric"
+        <label>Died <input autoComplete="off" value={form.death_year} placeholder="year" inputMode="numeric"
           onChange={e => setForm({ ...form, death_year: e.target.value.replace(/\D/g, '') })} style={{ width: 80 }} /></label>
-        <label className="grow">Notes <input value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} /></label>
+        <label className="grow">Notes <input autoComplete="off" value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} /></label>
         <button className="primary" disabled={!dirty} onClick={save}>Save</button>
         <p className="muted small full">Birth/death years stop this person being suggested in photos dated outside their lifetime. <b>Notes</b> are for you only: they stay in the app and are not written to photo files.</p>
       </section>
 
       <FamilyCard person={p} onChanged={() => { refresh() }} />
 
+      <PersonKeywordsCard key={JSON.stringify([p.id, p.keywords, p.keyword_ids])} person={p} onSaved={load} />
       <AliasCard key={p.id + ':' + JSON.stringify(p.aliases)} person={p} onSaved={load} />
 
       {p.suggested.length > 0 && (
         <section className="card">
           <div className="card-head">
             <h2>Suggested — is this {p.name}? <span className="muted">({p.suggested.length})</span></h2>
-            <div className="row">
-              <button onClick={() => setSelSugg(new Set(p.suggested.map(f => f.id)))}>Select all</button>
-              <button onClick={() => setSelSugg(new Set())} disabled={!selSugg.size}>Clear</button>
+            <div className="row wrap">
+              {p.suggested.some(f => f.people_keywords !== undefined) &&
+                <PeopleKeywordsCheckbox checked={showPeopleKeywords} onChange={setShowPeopleKeywords} />}
+              <button disabled={reviewing} onClick={() => setSelSugg(new Set(p.suggested.map(f => f.id)))}>Select all</button>
+              <button onClick={() => setSelSugg(new Set())} disabled={reviewing || !selSugg.size}>Clear</button>
             </div>
           </div>
-          <p className="muted small">Select the wrong ones and click <b>Not {p.name}</b>, then <b>Confirm</b> the rest.</p>
-          <FaceGrid faces={p.suggested} selected={selSugg} onSelect={setSelSugg} />
+          <p className="muted small">Use <b>Ignore</b> for false detections and <b>Not {p.name}</b> for a different person. Then <b>Confirm</b> the correct suggestions.</p>
+          <FaceGrid faces={p.suggested} selected={selSugg} onSelect={next => { if (!reviewing) setSelSugg(next) }} size={thumbnailSize}
+            showPeopleKeywords={showPeopleKeywords} />
           <div className="action-bar">
             <span className="scope">{selSugg.size ? `${selSugg.size} selected` : `all ${p.suggested.length}`}</span>
-            <button className="primary" onClick={() => act(() => api.assign(suggIds, { person_id: pid }), `Confirmed ${suggIds.length}`)}>
-              Confirm
+            <button className="primary" disabled={reviewing} onClick={() => reviewFaces('confirm', 'suggested', suggIds)}>
+              <span aria-live="polite">
+                {suggestedAction === 'confirm' ? `Confirming ${pendingFaces}…` : 'Confirm'}
+              </span>
             </button>
-            <button disabled={!selSugg.size} onClick={() => act(() => api.reject([...selSugg]), 'Rejected')}>
-              Not {p.name}
+            <button disabled={reviewing || !selSugg.size} onClick={() => reviewFaces('reject', 'suggested', [...selSugg])}>
+              <span aria-live="polite">{suggestedAction === 'reject' ? `Rejecting ${pendingFaces}…` : notPerson}</span>
+            </button>
+            <button className="danger" disabled={reviewing || !selSugg.size}
+              onClick={() => reviewFaces('ignore', 'suggested', [...selSugg])} title="Ignore selected false detections">
+              <span aria-live="polite">{suggestedAction === 'ignore' ? `Ignoring ${pendingDetections}…` : 'Ignore'}</span>
             </button>
           </div>
         </section>
@@ -291,22 +392,27 @@ export function PersonPage() {
 
       <section className="card">
         <div className="card-head">
-          <h2>Confirmed <span className="muted">({p.confirmed.length})</span></h2>
+          <h2>Confirmed <span className="muted">({confirmed.faces.length})</span></h2>
           <div className="row">
-            <button onClick={() => setSelConf(new Set(p.confirmed.map(f => f.id)))}>Select all</button>
-            <button onClick={() => setSelConf(new Set())} disabled={!selConf.size}>Clear</button>
+            <button disabled={reviewing} onClick={() => setSelConf(new Set(confirmed.faces.map(f => f.id)))}>Select all</button>
+            <button onClick={() => setSelConf(new Set())} disabled={reviewing || !selConf.size}>Clear</button>
           </div>
         </div>
-        <FaceGrid faces={p.confirmed} selected={selConf} onSelect={setSelConf} showNames={false} />
+        <FaceGrid faces={confirmed.faces} alternateImages={confirmed.alternateImages}
+          selected={selConf} onSelect={next => { if (!reviewing) setSelConf(next) }} showNames={false} size={thumbnailSize} />
         <div className="action-bar">
           <span className="scope">{selConf.size} selected</span>
-          <button disabled={!selConf.size} onClick={() => act(() => api.reject([...selConf]), `Removed ${selConf.size}`)}
+          <button disabled={reviewing || !selConf.size} onClick={() => reviewFaces('reject', 'confirmed', [...selConf])}
             title="Not this person - won't be suggested as them again">
-            Not {p.name}
+            <span aria-live="polite">{confirmedAction === 'reject' ? `Rejecting ${pendingFaces}…` : notPerson}</span>
           </button>
-          <PersonPicker buttonLabel="Move to" placeholder="Move to person…" disabled={!selConf.size}
+          <button className="danger" disabled={reviewing || !selConf.size} onClick={() => reviewFaces('ignore', 'confirmed', [...selConf])}
+            title="Ignore selected false detections. Removing the last confirmation may remove an app-added person keyword.">
+            <span aria-live="polite">{confirmedAction === 'ignore' ? `Ignoring ${pendingDetections}…` : 'Ignore'}</span>
+          </button>
+          <PersonPicker buttonLabel="Move to" placeholder="Move to person…" disabled={reviewing || !selConf.size}
             excludeId={pid} onPick={(who, label) => act(() => api.assign([...selConf], who), `Moved to ${label}`)} />
-          <button disabled={selConf.size !== 1}
+          <button disabled={reviewing || selConf.size !== 1}
             onClick={() => act(() => api.updatePerson(pid, { cover_face_id: [...selConf][0] }), 'Cover set')}>
             Use as cover
           </button>

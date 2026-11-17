@@ -27,20 +27,20 @@ const NAMESPACES: Record<string, string> = {
 
 const BADGE = {
   app: ['app', 'Written by this app'],
-  changed: ['changed', 'This app has changed it (the original value is saved in sa:Original…)'],
+  changed: ['changed', 'This app has changed it (the original value is saved in pm:Original…)'],
   managed: ['managed', 'This app updates it when you edit keywords, caption, date or location'],
 } as const
 
 const show = (v: unknown) => typeof v === 'string' ? v : JSON.stringify(v)
 
 /** Every EXIF / IPTC / XMP tag in the front image, read-only (for debugging). */
-export function FileMetadata({ photoId }: { photoId: number }) {
+export function FileMetadata({ photoId, imageId }: { photoId: number; imageId?: number }) {
   const [data, setData] = useState<Meta | null>(null)
   const [error, setError] = useState('')
 
   useEffect(() => {
-    api.fileMetadata(photoId).then(setData, e => setError((e as Error).message))
-  }, [photoId])
+    api.fileMetadata(photoId, imageId).then(setData, e => setError((e as Error).message))
+  }, [photoId, imageId])
 
   return (
     <section className="card">

@@ -16,18 +16,26 @@ from collections import defaultdict
 
 import numpy as np
 
-from . import config, match
+from . import config, folders, match
 
 
-def groups(conn: sqlite3.Connection, threshold: float | None = None) -> list[dict]:
+def groups(conn: sqlite3.Connection, threshold: float | None = None, *,
+           image_ids: set[int] | None = None) -> list[dict]:
     """[{person_id, confirmed, guess, faces: [{face_id, similarity, seed}]}], most
     confirmed faces first. Each unnamed face appears once, under its closest person."""
     if threshold is None:
         threshold = config.get(conn, "neighbour_threshold")
     rows = conn.execute(
-        "SELECT f.id, f.status, f.person_id, i.photo_id, f.embedding FROM faces f "
+        "SELECT f.id, f.status, f.person_id, i.photo_id, i.id AS image_id, i.path, "
+        "i.recognition_enabled, f.embedding FROM faces f "
         "JOIN images i ON i.id = f.image_id WHERE f.candidate = 0 AND f.embedding IS NOT NULL "
         "AND f.status IN ('confirmed', 'suggested', 'unknown')").fetchall()
+    policy = folders.load(conn)
+    rows = [r for r in rows if (
+        r["recognition_enabled"] and policy.image(r["path"], "learn")
+        if r["status"] == "confirmed" else
+        image_ids is None or r["image_id"] in image_ids
+    )]
     if not rows:
         return []
     vec = {r["id"]: np.frombuffer(r["embedding"], dtype=np.float32) for r in rows}
@@ -50,7 +58,7 @@ def groups(conn: sqlite3.Connection, threshold: float | None = None) -> list[dic
     for r in conn.execute("SELECT face_id, person_id FROM rejections"):
         rejected[r["face_id"]].add(r["person_id"])
     impossible = match._impossible_people(conn)
-    image_of = {r["id"]: r["image_id"] for r in conn.execute("SELECT id, image_id FROM faces")}
+    anchor_vectors = {p: np.stack([vec[f] for f in ids]) for p, ids in anchors.items()}
 
     out: dict[int, dict] = {}
     anchor_set = {f for ids in anchors.values() for f in ids}
@@ -60,12 +68,12 @@ def groups(conn: sqlite3.Connection, threshold: float | None = None) -> list[dic
         if r["status"] == "confirmed" or fid in anchor_set:
             continue
         best_p, best_s = None, threshold
-        for p, ids in anchors.items():
-            if p in rejected.get(fid, ()) or p in impossible.get(image_of[fid], ()):
+        for p, examples in anchor_vectors.items():
+            if p in rejected.get(fid, ()) or p in impossible.get(r["image_id"], ()):
                 continue
             if r["photo_id"] in photos_with[p]:      # one person is not twice in a photo
                 continue
-            s = float(max(np.stack([vec[a] for a in ids]) @ vec[fid]))
+            s = float(np.max(examples @ vec[fid]))
             if s >= best_s:
                 best_p, best_s = p, s
         if best_p is not None:

@@ -15,9 +15,10 @@ import shutil
 import sqlite3
 from collections import Counter
 from collections.abc import Callable
+from contextlib import closing
 from pathlib import Path
 
-from . import db, ingest, keywords, xmp
+from . import config, db, folders, ingest, keywords, match, xmp
 
 LIB_DIR = ".shoebox"
 
@@ -128,6 +129,13 @@ def open_startup(legacy_dir: Path | None = None) -> Path | None:
     return _current
 
 
+def recheck_keyword_suggestions(path: Path) -> None:
+    """Resolve saved suggestions that now qualify for Name from keywords."""
+    with closing(db.connect(path)) as conn:
+        if config.get(conn, "keyword_autoconfirm"):
+            match.label_from_keywords(conn, suggestions_only=True)
+
+
 # ------------------------------------------------------------------ inspecting a folder
 
 Progress = Callable[[str, int, int], None]
@@ -185,6 +193,24 @@ def propose_facets(found: dict | None, preset: str = "family") -> list[dict]:
     return facets
 
 
+def inspect_vocabulary(root: Path, preset: str) -> tuple[bool, list[dict], str]:
+    path = root / ingest.VOCABULARY_FILE
+    if not path.is_file():
+        preset = default_preset(None) if preset == "auto" else preset
+        return False, propose_facets(None, preset), preset
+    content = path.read_text(encoding="utf-8-sig")
+    entries = keywords.parse_vocabulary(content)
+    found = {"top": Counter(keywords.top_level(category) for category, _ in entries if category),
+             "paths": {f"{category}|{name}": 1 for category, name in entries if category}}
+    preset = default_preset(found) if preset == "auto" else preset
+    facets = propose_facets(found, preset)
+    people = keywords.person_groups(content)
+    for facet in facets:
+        if facet["name"] in people:
+            facet["kind"] = "person"
+    return True, facets, preset
+
+
 def default_preset(found: dict | None) -> str:
     """Folders that already have keyword groups start from those; empty folders from the family preset."""
     return "files" if (found or {}).get("top") else "family"
@@ -216,7 +242,7 @@ def get_curator(conn: sqlite3.Connection) -> dict | None:
 
 
 def create(root: Path, facets: list[dict], found: dict | None = None,
-           curator: str = "") -> Path:
+           curator: str = "", *, staged: bool = False) -> Path:
     """Create the data folder, configure facets, and seed the vocabulary with the
     hierarchical keywords found in the files. Returns the data directory.
     Photos are not modified. Raises FileExistsError if the folder already has a library."""
@@ -226,6 +252,7 @@ def create(root: Path, facets: list[dict], found: dict | None = None,
     if has_library(root):
         raise FileExistsError(f"{root} already has a Shoebox Archivist library")
     data = data_dir_for(root)
+    new_data = not data.exists()
     data.mkdir(exist_ok=True)
     conn = db.connect(data / "library.db")
     try:
@@ -235,11 +262,20 @@ def create(root: Path, facets: list[dict], found: dict | None = None,
             category, name = keywords.split(path)
             if category:
                 keywords.ensure(conn, category, name, in_vocab=True)
+        if staged:
+            folders.Policy(default=False, active=True).save(conn)
+            vocabulary = root / ingest.VOCABULARY_FILE
+            if vocabulary.is_file():
+                keywords.load_vocabulary(conn, vocabulary)
         set_curator(conn, curator)
         conn.commit()
     except Exception:
         conn.close()
-        shutil.rmtree(data, ignore_errors=True)
+        if new_data:
+            shutil.rmtree(data, ignore_errors=True)
+        else:
+            for suffix in ("", "-wal", "-shm", "-journal"):
+                (data / f"library.db{suffix}").unlink(missing_ok=True)
         raise
     conn.close()
     return data
@@ -274,6 +310,7 @@ def describe(conn: sqlite3.Connection) -> dict:
         "root": db.get_setting(conn, "library_root"),
         "data_dir": str(_current.resolve()) if _current else None,
         "managed": is_managed(),
+        "folder_scoped": folders.load(conn).active,
         "curator": get_curator(conn),
         "facets": [{**f, "keywords": keywords._facet_keyword_count(conn, f["name"])}
                    for f in keywords.get_facets(conn)],

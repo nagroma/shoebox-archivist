@@ -37,28 +37,12 @@ def _jpg(path, shade):
     Image.new("RGB", (8, 8), (shade, shade, shade)).save(path)
 
 
-def test_fastfoto_enhanced_copy_is_the_same_photo(tmp_path):
+def test_fastfoto_corrected_copy_stays_separate_until_a_convention_is_saved(tmp_path):
     from backend import db, ingest
-    for name, shade in [("IMG_1.jpg", 10), ("IMG_1_a.jpg", 20), ("IMG_1_b.jpg", 30),
-                        ("Solo_a.jpg", 40)]:          # a lone _a has no original: it is the front
+
+    for name, shade in [("IMG_1.jpg", 10), ("IMG_1_a.jpg", 20), ("IMG_1_b.jpg", 30)]:
         _jpg(tmp_path / name, shade)
-    conn = db.connect(tmp_path / "t.db")
-    ingest.register_images(conn, tmp_path.resolve(), tmp_path.resolve())
-    rows = {r["path"]: (r["role"], r["variant"]) for r in conn.execute("SELECT * FROM images")}
-    assert rows == {"IMG_1.jpg": ("front", None), "IMG_1_a.jpg": ("other", "enhanced"),
-                    "IMG_1_b.jpg": ("back", None), "Solo_a.jpg": ("front", None)}
-    assert conn.execute("SELECT COUNT(DISTINCT photo_id) FROM images").fetchone()[0] == 2
-
-
-def test_merge_enhanced_folds_an_earlier_import(tmp_path):
-    from backend import db, ingest
-    conn = db.connect(tmp_path / "t.db")
-    for n, (path, sha) in enumerate([("IMG_1.jpg", "a"), ("IMG_1_a.jpg", "b")], 1):
-        conn.execute("INSERT INTO photos(id) VALUES (?)", (n,))
-        conn.execute("INSERT INTO images(photo_id, role, path, sha1) VALUES (?, 'front', ?, ?)",
-                     (n, path, sha))
-    merged, left = ingest.merge_enhanced(conn, tmp_path)
-    assert (merged, left) == (1, [])
-    assert conn.execute("SELECT COUNT(*) FROM photos").fetchone()[0] == 1
-    assert conn.execute("SELECT photo_id, role, variant FROM images WHERE path = 'IMG_1_a.jpg'"
-                        ).fetchone()[:] == (1, "other", "enhanced")
+    with db.connect(tmp_path / "t.db") as conn:
+        ingest.register_images(conn, tmp_path, tmp_path)
+        rows = {r["path"]: r["photo_id"] for r in conn.execute("SELECT path, photo_id FROM images")}
+        assert rows["IMG_1.jpg"] != rows["IMG_1_a.jpg"]

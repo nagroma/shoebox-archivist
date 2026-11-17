@@ -277,17 +277,16 @@ def test_former_partner(tmp_path):
         family.set_ended(conn, P["Me"], P["ExMom"], True)
 
 
-@needs_sample
 def test_regroup_turns_family_keyword_into_people_and_family(tmp_path):
+    from PIL import Image
+    import pyexiv2
     from backend import regroup
     photo = tmp_path / "a.jpg"
-    shutil.copy(SAMPLE, photo)
-    xmp.add_keywords(photo, ["Ashdown|JuliaAshdown"])       # stands in for the owner's keyword
-    xmp.write_fields(photo)                          # no-op, keeps the file valid
-    before = xmp.read(photo)
-    owner = [k for k in before.keywords if k != "Ashdown|JuliaAshdown"]
-    # make Ashdown|JuliaAshdown the owner's own: not app-added
-    xmp._write(photo, before.keywords, before.flat, [], removed=None)
+    Image.new("RGB", (8, 8)).save(photo)
+    owner = ["Places|Example"]
+    with pyexiv2.Image(str(photo)) as im:
+        im.modify_xmp({xmp.HS: [*owner, "Ashdown|JuliaAshdown"],
+                       xmp.SUBJ: ["Example", "JuliaAshdown"]})
 
     conn = db.connect(tmp_path / "t.db")
     db.set_setting(conn, "library_root", str(tmp_path))
@@ -315,6 +314,9 @@ def test_regroup_turns_family_keyword_into_people_and_family(tmp_path):
     back = xmp.read(photo)
     assert "Ashdown|JuliaAshdown" in back.keywords and "People|JuliaAshdown" not in back.keywords
     assert back.removed == []
+
+    xmp.restore_fields(photo)
+    assert set(xmp.read(photo).keywords) == {*owner, "Ashdown|JuliaAshdown"}
 
 
 def test_marks_structure_new_person_and_reuse(tmp_path):

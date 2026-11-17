@@ -1,12 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { PersonRef } from '../api'
-import { useApp } from '../state'
+import { api, type PersonRef } from '../api'
+import { keywordSpelling } from '../keywordSpelling'
+import { PersonKeywordForm } from './PersonKeywordForm'
+import { useAction, useApp } from '../state'
+
+const normalized = (name: string) => name.replace(/\s/g, '').toLowerCase()
 
 interface Props {
   /** Called with an existing person or a new name. */
   onPick: (who: PersonRef, label: string) => void
   placeholder?: string
   initial?: string
+  /** Keep an untouched suggestion tied to its person, even when names match. */
+  initialPersonId?: number
   buttonLabel?: string
   disabled?: boolean
   /** Exclude a person (e.g. when merging, the person themself). */
@@ -19,10 +25,15 @@ interface Props {
 
 /** Type-ahead person chooser. Enter picks the highlighted match, or creates a new person. */
 export function PersonPicker({
-  onPick, placeholder = 'Name…', initial = '', buttonLabel = 'Assign',
+  onPick, placeholder = 'Name…', initial = '', initialPersonId, buttonLabel = 'Assign',
   disabled, excludeId, allowNew = true, autoFocus, clearOnPick,
 }: Props) {
-  const { people, resolvePerson } = useApp()
+  const { people, resolvePerson, refresh } = useApp()
+  const run = useAction()
+  const [creating, setCreating] = useState(false)
+  const [category, setCategory] = useState('')
+  const [keyword, setKeyword] = useState('')
+  const [saving, setSaving] = useState(false)
   const [text, setText] = useState(initial)
   const [open, setOpen] = useState(false)
   const [hi, setHi] = useState(0)
@@ -30,45 +41,68 @@ export function PersonPicker({
 
   useEffect(() => setText(initial), [initial])
 
+  const preferredId = text === initial && initialPersonId !== excludeId ? initialPersonId : undefined
   const matches = useMemo(() => {
-    const t = text.trim().toLowerCase()
+    const t = normalized(text)
     return people
       .filter(p => p.id !== excludeId)
-      .filter(p => !t || p.name.toLowerCase().includes(t) ||
-        p.aliases?.some(a => a.name.toLowerCase().includes(t)))
+      .filter(p => p.id === preferredId || !t || normalized(p.name).includes(t) ||
+        p.aliases?.some(a => normalized(a.name).includes(t)) ||
+        p.keyword_paths?.some(k => normalized(k).includes(t)))
       .sort((a, b) => {
-        const as = a.name.toLowerCase().startsWith(t) ? 0 : 1
-        const bs = b.name.toLowerCase().startsWith(t) ? 0 : 1
+        if (a.id === preferredId || b.id === preferredId) return a.id === preferredId ? -1 : 1
+        const as = normalized(a.name).startsWith(t) ? 0 : 1
+        const bs = normalized(b.name).startsWith(t) ? 0 : 1
         return as - bs || a.name.localeCompare(b.name)
       })
       .slice(0, 8)
-  }, [people, text, excludeId])
+  }, [people, text, excludeId, preferredId])
 
-  const low = text.trim().toLowerCase()
-  const exact = people.some(p => p.name.toLowerCase() === low ||
-    p.aliases?.some(a => a.name.toLowerCase() === low))
+  const low = normalized(text)
+  const exact = people.some(p => normalized(p.name) === low ||
+    p.aliases?.some(a => normalized(a.name) === low) ||
+    p.keyword_paths?.some(k => normalized(k.split('|').slice(-1)[0] ?? '') === low))
   const showNew = allowNew && text.trim() !== '' && !exact
-  const options: { label: string; who: PersonRef }[] = [
+  const options: { label: string; paths?: string[]; who: PersonRef }[] = [
     ...matches.map(p => ({
       label: p.aliases?.length ? `${p.display_name} (${[p.name, ...p.aliases.map(a => a.name)].filter(n => n !== p.display_name).join(', ')})` : p.name,
+      paths: p.keyword_paths,
       who: { person_id: p.id } as PersonRef,
     })),
     ...(showNew ? [{ label: `+ New person "${text.trim()}"`, who: { name: text.trim() } as PersonRef }] : []),
   ]
 
+  function choose(who: PersonRef, label: string) {
+    if ('name' in who) {
+      setKeyword(keywordSpelling(who.name)); setCategory(''); setCreating(true); setOpen(false)
+    } else {
+      onPick(who, label); setOpen(false)
+      if (clearOnPick) { setText(''); setHi(0) }
+    }
+  }
+
+  async function create() {
+    setSaving(true)
+    const person = await run(() => api.createPerson(text.trim(), category, keyword))
+    setSaving(false)
+    if (person) {
+      await refresh()
+      setCreating(false)
+      choose({ person_id: person.id }, person.name)
+    }
+  }
+
   function pick(i: number) {
     const o = options[i]
     if (!o) {
+      if (preferredId !== undefined) { choose({ person_id: preferredId }, text); return }
       const who = resolvePerson(text)
       if (who && (allowNew || 'person_id' in who)) {
-        onPick(who, text.trim())
-        if (clearOnPick) { setText(''); setHi(0) }
+        choose(who, text.trim())
       }
       return
     }
-    onPick(o.who, 'name' in o.who ? o.who.name : o.label)
-    setOpen(false)
-    if (clearOnPick) { setText(''); setHi(0) }
+    choose(o.who, 'name' in o.who ? o.who.name : o.label)
   }
 
   useEffect(() => {
@@ -79,9 +113,22 @@ export function PersonPicker({
     return () => document.removeEventListener('mousedown', close)
   }, [])
 
+  if (creating) return (
+    <div className="card">
+      <b>New person: {text.trim()}</b>
+      <PersonKeywordForm category={category} name={keyword} onChange={(c, n) => { setCategory(c); setKeyword(n) }} />
+      <div className="row">
+        <button className="primary" disabled={saving || !category.trim() || !keyword.trim()} onClick={create}>
+          {saving ? 'Saving…' : `Create person and ${buttonLabel.toLowerCase()}`}
+        </button>
+        <button disabled={saving} onClick={() => setCreating(false)}>Cancel</button>
+      </div>
+    </div>
+  )
+
   return (
     <div className="picker" ref={boxRef}>
-      <input
+      <input autoComplete="off"
         value={text}
         placeholder={placeholder}
         disabled={disabled}
@@ -106,7 +153,7 @@ export function PersonPicker({
               className={i === hi ? 'hi' : ''}
               onMouseEnter={() => setHi(i)}
               onMouseDown={e => { e.preventDefault(); pick(i) }}
-            >{o.label}</li>
+            >{o.label}{o.paths?.map(path => <code className="picker-path" key={path}>{path}</code>)}</li>
           ))}
         </ul>
       )}

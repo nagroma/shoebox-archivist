@@ -35,7 +35,7 @@ def test_bad_values_are_rejected_and_nothing_is_saved(conn, changes):
 def test_threshold_comes_from_settings(conn, monkeypatch):
     seen = []
     monkeypatch.setattr(match, "label_from_keywords",
-                        lambda c, confirm=True: seen.append(confirm))
+                        lambda c, confirm=True: seen.append(confirm) or 0)
     config.save(conn, {"suggest_threshold": 0.5, "keyword_autoconfirm": False})
     match.suggest(conn)
     assert seen == [False]  # keyword names are only suggested, not confirmed

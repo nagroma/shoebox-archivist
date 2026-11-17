@@ -1,22 +1,31 @@
 ﻿"""Local web API + static UI.  Run with `uv run pm serve`."""
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sqlite3
+import subprocess
+import sys
 import threading
+import time
+from tempfile import NamedTemporaryFile
+from functools import wraps
+from collections import Counter
 from collections.abc import Iterator
 from datetime import date
 from pathlib import Path
+from typing import Literal
 
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageOps
 from pydantic import BaseModel
 
-from . import (actions, candidates, cluster, config, dates, db, faces, family, ingest, neighbours,
-               keywords, library, match, names, regroup, xmp)
+from . import (actions, candidates, cluster, config, dates, db, faces, face_repair, face_review,
+               family, folders, ingest, keywords, library, match, names, neighbours, regroup, sharing,
+               variations, xmp)
 
 FRONTEND = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 SIZES = {"thumb": 320, "large": 2000}
@@ -51,7 +60,15 @@ SELECT f.id, f.image_id, i.photo_id, i.path, f.x1, f.y1, f.x2, f.y2, f.det_score
        p.name AS primary_name, p.name_from_year,
        CAST(substr(ph.date_min, 1, 4) AS INTEGER) AS photo_year,
        """ + names.ALIAS_BLOB_SQL.format(pid="f.person_id") + """ AS alias_blob,
-       f.confidence, f.cluster_id, f.label_source
+       f.confidence, f.cluster_id, f.label_source,
+       CASE WHEN f.status = 'suggested' THEN (
+           SELECT json_group_array(path) FROM (
+               SELECT k.category || '|' || k.name AS path
+               FROM photo_keywords pk JOIN keywords k ON k.id = pk.keyword_id
+               WHERE pk.photo_id = i.photo_id AND k.person_id IS NOT NULL
+               ORDER BY k.category COLLATE NOCASE, k.name COLLATE NOCASE, k.id
+           )
+       ) END AS people_keywords
 FROM faces f JOIN images i ON i.id = f.image_id JOIN photos ph ON ph.id = i.photo_id
 LEFT JOIN people p ON p.id = f.person_id
 """
@@ -80,6 +97,7 @@ def face_json(r: sqlite3.Row) -> dict:
         "status": r["status"], "person_id": r["person_id"], "person_name": _name_on_photo(r),
         "confidence": r["confidence"], "cluster_id": r["cluster_id"],
         "label_source": r["label_source"],
+        "people_keywords": json.loads(r["people_keywords"]) if r["people_keywords"] else [],
     }
 
 
@@ -93,12 +111,35 @@ def date_json(text: str | None) -> dict | None:
 
 # ---------------------------------------------------------------- overview
 
+def version_mutation(fn):
+    """Serialize file/group edits with imports; never regroup while a file is being edited."""
+    @wraps(fn)
+    def guarded(*args, **kwargs):
+        with variations.LOCK:
+            if JOB.state.get('running'):
+                raise HTTPException(409, 'Wait for the import to finish before editing photo versions or keywords')
+            return fn(*args, **kwargs)
+    return guarded
+
+
 @app.get("/api/stats")
 def stats(conn=Conn):
     q = lambda sql: conn.execute(sql).fetchone()[0]
-    by_status = {r[0]: r[1] for r in conn.execute("SELECT status, COUNT(*) FROM faces GROUP BY status")}
+    by_status = {r[0]: r[1] for r in conn.execute("SELECT f.status, COUNT(*) FROM faces f JOIN images i ON i.id=f.image_id WHERE i.recognition_enabled=1 GROUP BY f.status")}
+    policy = folders.load(conn)
+    if policy.active:
+        review_statuses = Counter()
+        for row in conn.execute(
+            "SELECT i.path, f.status, COUNT(*) AS n FROM faces f JOIN images i ON i.id=f.image_id "
+            "WHERE i.recognition_enabled=1 AND f.status IN ('unknown', 'suggested') GROUP BY i.id, f.status"
+        ):
+            if policy.image(row["path"], "identify"):
+                review_statuses[row["status"]] += row["n"]
+        by_status.update(unknown=review_statuses["unknown"], suggested=review_statuses["suggested"])
     return {
         "library_root": db.get_setting(conn, "library_root"),
+        "can_show_in_finder": sys.platform == "darwin",
+        "keyword_differences": int(db.get_setting(conn, 'sharing.pending') or '0'),
         "db_token": db.get_setting(conn, "db_token"),
         "photos": q("SELECT COUNT(*) FROM photos"),
         "people": q("SELECT COUNT(*) FROM people"),
@@ -114,30 +155,32 @@ def stats(conn=Conn):
 
 @app.get("/api/clusters")
 def clusters(conn=Conn):
-    rows = conn.execute(FACE_SQL + " WHERE f.status IN ('unknown', 'suggested') "
-                        "AND f.cluster_id IS NOT NULL ORDER BY f.cluster_id, f.id").fetchall()
+    if folders.load(conn).active:
+        return _review_clusters(conn, face_review.plan(conn)[0])
+    return _review_clusters(conn)
+
+
+def _review_clusters(conn, image_ids=None):
+    recognition_only = "AND i.recognition_enabled=1" if image_ids is None else "AND f.candidate=0"
+    rows = conn.execute(FACE_SQL + " WHERE f.status IN ('unknown', 'suggested') " + recognition_only +
+                        " ORDER BY f.cluster_id IS NULL, f.cluster_id, f.id")
     groups: dict[int, list] = {}
     for r in rows:
-        groups.setdefault(r["cluster_id"], []).append(face_json(r))
+        if image_ids is not None and r['image_id'] not in image_ids:
+            continue
+        cid = r['cluster_id'] if r['cluster_id'] is not None else -1
+        groups.setdefault(cid, []).append(face_json(r))
     out = [{"cluster_id": cid, "faces": fs} for cid, fs in groups.items() if cid >= 0]
     out.sort(key=lambda c: -len(c["faces"]))
     if -1 in groups:
         out.append({"cluster_id": -1, "faces": groups[-1]})
-    # Faces never clustered (e.g. added since the last run) show as unclustered too.
-    loose = conn.execute(FACE_SQL + " WHERE f.status IN ('unknown', 'suggested') "
-                         "AND f.cluster_id IS NULL ORDER BY f.id").fetchall()
-    if loose:
-        if out and out[-1]["cluster_id"] == -1:
-            out[-1]["faces"].extend(face_json(r) for r in loose)
-        else:
-            out.append({"cluster_id": -1, "faces": [face_json(r) for r in loose]})
     return out
 
 
 @app.get("/api/matches")
 def matches(conn=Conn):
     """Unnamed faces that look like people already named, grouped by person (see neighbours.py)."""
-    gs = neighbours.groups(conn)
+    gs = neighbours.groups(conn, image_ids=face_review.plan(conn)[0])
     ids = [f["face_id"] for g in gs for f in g["faces"]]
     by_id = {}
     if ids:
@@ -177,16 +220,39 @@ class AssignIn(FacesIn):
 
 
 @app.post("/api/faces/assign")
+@version_mutation
 def faces_assign(body: AssignIn, conn=Conn):
     try:
         pid = actions.person_id_for(conn, body.person_id, body.name)
     except ValueError as e:
         raise HTTPException(400, str(e))
     actions.assign(conn, body.face_ids, pid)
+    sharing.update_pending(conn)
     return {"person_id": pid, "suggestions": actions.resuggest(conn)}
 
 
+class FaceGuessIn(BaseModel):
+    face_id: int
+    person_id: int
+
+
+class AcceptGuessesIn(BaseModel):
+    guesses: list[FaceGuessIn]
+
+
+@app.post("/api/faces/accept-guesses")
+@version_mutation
+def faces_accept_guesses(body: AcceptGuessesIn, conn=Conn):
+    try:
+        accepted = actions.accept_suggestions(conn, [(g.face_id, g.person_id) for g in body.guesses])
+    except ValueError as e:
+        raise HTTPException(409, str(e)) from e
+    sharing.update_pending(conn)
+    return {"accepted": accepted, "suggestions": actions.resuggest(conn)}
+
+
 @app.post("/api/faces/reject")
+@version_mutation
 def faces_reject(body: FacesIn, conn=Conn):
     n = actions.reject(conn, body.face_ids)
     return {"rejected": n, "suggestions": actions.resuggest(conn)}
@@ -197,12 +263,14 @@ class NotPersonIn(FacesIn):
 
 
 @app.post("/api/faces/not-person")
+@version_mutation
 def faces_not_person(body: NotPersonIn, conn=Conn):
     n = actions.reject_person(conn, body.face_ids, body.person_id)
     return {"rejected": n, "suggestions": actions.resuggest(conn)}
 
 
 @app.post("/api/faces/ignore")
+@version_mutation
 def faces_ignore(body: FacesIn, conn=Conn):
     actions.ignore(conn, body.face_ids)
     return {"ok": True}
@@ -212,8 +280,14 @@ def faces_ignore(body: FacesIn, conn=Conn):
 def faces_candidates(conn=Conn):
     """Possible faces from the thorough scan, waiting for 'face' / 'not a face'.
     Sorted most face-like first, using earlier decisions (see candidates.py)."""
-    rows = conn.execute(FACE_SQL + " WHERE f.candidate = 1 AND f.status != 'ignored' "
-                        "ORDER BY i.path, f.id").fetchall()
+    return _review_candidates(conn)
+
+
+def _review_candidates(conn, image_ids=None):
+    recognition_only = " AND i.recognition_enabled=1" if image_ids is None else ""
+    rows = [r for r in conn.execute(FACE_SQL + " WHERE f.candidate = 1 AND f.status != 'ignored'" +
+                                    recognition_only + " ORDER BY i.path, f.id")
+            if image_ids is None or r['image_id'] in image_ids]
     scores, info = candidates.score(conn)
     out = []
     for r in rows:
@@ -286,13 +360,55 @@ def faces_ignored(conn=Conn):
     return [face_json(r) for r in conn.execute(FACE_SQL + " WHERE f.status = 'ignored' ORDER BY f.id")]
 
 
+class FaceViewIn(BaseModel):
+    preferred: str | None = None
+    also_show: list[str] = []
+
+
+def _faces_review(conn, image_ids, view):
+    ignored = [face_json(r) for r in conn.execute(FACE_SQL + " WHERE f.status = 'ignored' ORDER BY f.id")
+               if r['image_id'] in image_ids]
+    return {'view': view, 'clusters': _review_clusters(conn, image_ids),
+            'candidates': _review_candidates(conn, image_ids), 'ignored': ignored}
+
+
+@app.get('/api/faces/review')
+def faces_review(conn=Conn):
+    return _faces_review(conn, *face_review.plan(conn))
+
+
+@app.put('/api/faces/review')
+def faces_review_save(body: FaceViewIn, conn=Conn):
+    import json
+    images, view = face_review.plan(conn, body.model_dump())
+    db.set_setting(conn, face_review.SETTING, json.dumps({k: view[k] for k in ('preferred', 'also_show')}))
+    conn.commit()
+    return _faces_review(conn, images, view)
+
+
 @app.get("/api/faces/{face_id}/thumb")
 def face_thumb(face_id: int):
     _need_library()
     p = library.thumbs_dir() / f"{face_id}.jpg"
     if not p.exists():
         raise HTTPException(404)
-    return FileResponse(p, headers={"Cache-Control": "max-age=86400"})  # URL carries ?v=<db_token>
+    return FileResponse(p, headers={"Cache-Control": "no-cache"})
+
+
+class FaceRepairIn(BaseModel):
+    rotate: bool
+
+
+@app.post("/api/faces/{face_id}/repair")
+@version_mutation
+def repair_face(face_id: int, body: FaceRepairIn, conn=Conn):
+    try:
+        repaired = face_repair.repair(conn, face_id, library.thumbs_dir(), rotate=body.rotate)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(400, f"Could not rebuild the face thumbnail: {exc}") from exc
+    return {"face_id": repaired, "revision": str(time.time_ns())}
 
 
 # ---------------------------------------------------------------- people
@@ -322,8 +438,12 @@ def people(conn=Conn):
     shown = _current_names(conn)
     cur = library.get_curator(conn)
     rel = family.labels(conn, cur["id"] if cur else None)
+    paths: dict[int, list[str]] = {}
+    for k in conn.execute("SELECT person_id, category, name FROM keywords WHERE person_id IS NOT NULL "
+                          "ORDER BY category, name"):
+        paths.setdefault(k["person_id"], []).append(f"{k['category']}|{k['name']}")
     return [{**dict(r), "aliases": aliases.get(r["id"], []), "relation": rel.get(r["id"]),
-             "display_name": shown[r["id"]]} for r in rows]
+             "keyword_paths": paths.get(r["id"], []), "display_name": shown[r["id"]]} for r in rows]
 
 
 def _aliases(conn: sqlite3.Connection, person_id: int | None = None) -> dict[int, list[dict]]:
@@ -374,13 +494,26 @@ def person_aliases(pid: int, body: list[AliasIn], conn=Conn):
     return _aliases(conn, pid).get(pid, [])
 
 
+class PersonCreateIn(PersonIn):
+    keyword_category: str | None = None
+    keyword_name: str | None = None
+
+
 @app.post("/api/people")
-def person_create(body: PersonIn, conn=Conn):
+def person_create(body: PersonCreateIn, conn=Conn):
     if not body.name or not body.name.strip():
         raise HTTPException(400, "name required")
-    pid = db.get_or_create_person(conn, body.name)
-    conn.commit()
-    return person_update(pid, body, conn)
+    try:
+        pid = db.get_or_create_person(conn, body.name)
+        if body.keyword_category is not None or body.keyword_name is not None:
+            kid = keywords.attach_person_keyword(conn, pid, body.keyword_category or "", body.keyword_name or "")
+            keywords.set_person_keywords(conn, pid, [kid])
+        conn.commit()
+    except ValueError as e:
+        conn.rollback()
+        raise HTTPException(400, str(e))
+    return person_update(pid, PersonIn(**body.model_dump(exclude={"keyword_category", "keyword_name"},
+                                                       exclude_unset=True)), conn)
 
 
 @app.get("/api/people/{pid}")
@@ -393,11 +526,38 @@ def person(pid: int, conn=Conn):
     kws = [dict(r) for r in conn.execute(
         "SELECT k.id, k.category, k.name, (SELECT COUNT(*) FROM photo_keywords pk "
         "WHERE pk.keyword_id = k.id) AS photos FROM keywords k WHERE k.person_id = ?", (pid,))]
-    return {**dict(row), "keywords": kws, "aliases": _aliases(conn, pid).get(pid, []),
+    selected = [r[0] for r in conn.execute(
+        "SELECT keyword_id FROM person_keyword_choices WHERE person_id = ?", (pid,))]
+    if not selected and kws:
+        selected = [keywords.person_keyword(conn, pid)]
+    return {**dict(row), "keywords": kws, "keyword_ids": selected,
+            "aliases": _aliases(conn, pid).get(pid, []),
             "display_name": _current_names(conn)[pid],
             "relation": _relatives_json(conn, pid)["relation"],
             "confirmed": [f for f in faces if f["status"] == "confirmed"],
             "suggested": [f for f in faces if f["status"] == "suggested"]}
+
+
+class PersonKeywordsIn(BaseModel):
+    keyword_ids: list[int]
+    category: str | None = None
+    name: str | None = None
+
+
+@app.put("/api/people/{pid}/keywords")
+def person_keywords_update(pid: int, body: PersonKeywordsIn, conn=Conn):
+    if not conn.execute("SELECT 1 FROM people WHERE id = ?", (pid,)).fetchone():
+        raise HTTPException(404, "No such person")
+    try:
+        ids = list(body.keyword_ids)
+        if body.category is not None or body.name is not None:
+            ids.append(keywords.attach_person_keyword(conn, pid, body.category or "", body.name or ""))
+        keywords.set_person_keywords(conn, pid, ids)
+        conn.commit()
+    except ValueError as e:
+        conn.rollback()
+        raise HTTPException(400, str(e))
+    return person(pid, conn)
 
 
 class RelativeIn(BaseModel):
@@ -558,7 +718,7 @@ PHOTO_FILTERS = {
     "all": "1",
     "undated": "ph.date_text IS NULL",
     "unnamed": "EXISTS (SELECT 1 FROM faces f JOIN images i2 ON i2.id = f.image_id "
-               "WHERE i2.photo_id = ph.id AND f.status IN ('unknown', 'suggested'))",
+               "WHERE i2.photo_id = ph.id AND i2.recognition_enabled=1 AND f.status IN ('unknown', 'suggested'))",
     "has_back": "EXISTS (SELECT 1 FROM images i2 WHERE i2.photo_id = ph.id AND i2.role = 'back')",
 }
 
@@ -598,12 +758,12 @@ def photos(filter: str = "all", person_id: int | None = None, q: str | None = No
     rows = conn.execute(f"""
         SELECT ph.id, ph.date_text, ph.date_min, ph.location, i.id AS front_id, i.path,
           (SELECT COUNT(*) FROM faces f JOIN images i2 ON i2.id = f.image_id WHERE i2.photo_id = ph.id
-             AND f.status != 'ignored') AS faces,
+             AND i2.recognition_enabled=1 AND f.status != 'ignored') AS faces,
           (SELECT COUNT(*) FROM faces f JOIN images i2 ON i2.id = f.image_id WHERE i2.photo_id = ph.id
-             AND f.status = 'confirmed') AS named
+             AND i2.recognition_enabled=1 AND f.status = 'confirmed') AS named
         FROM photos ph
         JOIN images i ON i.id = (SELECT id FROM images WHERE photo_id = ph.id
-                                 ORDER BY (COALESCE(variant, '') = 'enhanced' AND ?) DESC,
+                                 ORDER BY is_primary DESC, (variant = 'enhanced' AND ?) IS TRUE DESC,
                                           role = 'front' DESC, id LIMIT 1)
         WHERE {' AND '.join(where)}
         ORDER BY ph.date_min IS NULL, ph.date_min, i.path""",
@@ -617,16 +777,20 @@ def photos(filter: str = "all", person_id: int | None = None, q: str | None = No
 
 
 @app.get("/api/photos/{photo_id}/file-metadata")
-def photo_file_metadata(photo_id: int, conn=Conn):
+def photo_file_metadata(photo_id: int, image_id: int | None = None, conn=Conn):
     """All EXIF / IPTC / XMP tags in the photo's front image, plus which ones this app
     writes: 'app' = the app's own (pm:), 'changed' = edited by the app (original saved),
     'managed' = the app updates it when you edit, but hasn't yet."""
-    path = actions._front_path(conn, photo_id)
+    if image_id is not None:
+        row = conn.execute('SELECT path FROM images WHERE id=? AND photo_id=?', (image_id, photo_id)).fetchone()
+        path = db.library_root(conn) / row['path'] if row else None
+    else:
+        path = actions._front_path(conn, photo_id)
     if path is None or not path.exists():
         raise HTTPException(404)
     tags, warning = xmp.read_all_safe(path)
     x = tags["xmp"]
-    app = {k: "app" for k in x if k.startswith("Xmp.sa.")}
+    app = {k: "app" for k in x if k.startswith(("Xmp.pm.", "Xmp.sa."))}
     for key in xmp.MANAGED:
         if any(key in group for group in tags.values()):
             changed = xmp.ORIGINALS.get(key) in x or (
@@ -640,14 +804,24 @@ def photo(photo_id: int, conn=Conn):
     ph = conn.execute("SELECT * FROM photos WHERE id = ?", (photo_id,)).fetchone()
     if ph is None:
         raise HTTPException(404)
+    sharing.inventory(conn)
     images = [dict(r) for r in conn.execute(
-        "SELECT id, role, variant, path, width, height, is_bw FROM images WHERE photo_id = ? "
-        "ORDER BY role = 'front' DESC, id", (photo_id,))]
+        "SELECT id, role, path, width, height, is_bw, variation, variation_label, is_primary, recognition_enabled, variant "
+        "FROM images WHERE photo_id = ? ORDER BY is_primary DESC, "
+        "(variant = 'enhanced' AND ?) IS TRUE DESC, role = 'front' DESC, id",
+        (photo_id, int(config.get(conn, "show_enhanced"))))]
+    for image in images:
+        image['keyword_sources'] = dict(conn.execute('SELECT keyword_id,source FROM image_keywords WHERE image_id=?', (image['id'],)))
+        image['keyword_ids'] = [r[0] for r in conn.execute('SELECT keyword_id FROM image_keywords WHERE image_id=?', (image['id'],))]
+        image['exceptions'] = [dict(r) for r in conn.execute('SELECT keyword_id,present FROM image_keyword_exceptions WHERE image_id=?', (image['id'],))]
     faces = [face_json(r) for r in conn.execute(
         FACE_SQL + " WHERE i.photo_id = ? ORDER BY f.x1", (photo_id,))]
     return {**dict(ph), "date": date_json(ph["date_text"]), "images": images, "faces": faces,
-            "show_enhanced": config.get(conn, "show_enhanced"),
-            "keywords": photo_keywords(conn, photo_id)}
+            "keywords": photo_keywords(conn, photo_id),
+            "keyword_scopes": {str(k['id']): {'scope': sharing.resolve_scope(conn, photo_id, k['id'])[0],
+                                            'inherited': sharing.resolve_scope(conn, photo_id, k['id'])[1],
+                                            'library_mode': sharing.resolve_scope(conn, photo_id, k['id'], include_local=False)[0]['mode']}
+                               for k in photo_keywords(conn, photo_id)}}
 
 
 def photo_keywords(conn: sqlite3.Connection, photo_id: int) -> list[dict]:
@@ -667,12 +841,13 @@ def photo_keywords(conn: sqlite3.Connection, photo_id: int) -> list[dict]:
 
 
 @app.get("/api/keywords")
-def keyword_list(conn=Conn):
+def keyword_list(vocabulary_only: bool = False, conn=Conn):
     rows = conn.execute(
         "SELECT k.id, k.category, k.name, k.kind, k.person_id, k.in_vocab, "
         "(SELECT COUNT(*) FROM photo_keywords pk WHERE pk.keyword_id = k.id) AS photos "
         "FROM keywords k ORDER BY k.category, k.name").fetchall()
-    return [dict(r) for r in rows]
+    choices = folders.vocabulary_ids(conn) if vocabulary_only else None
+    return [dict(r) for r in rows if choices is None or r["id"] in choices]
 
 
 @app.delete("/api/keywords/{keyword_id}")
@@ -688,6 +863,8 @@ def keyword_delete(keyword_id: int, conn=Conn):
 
 
 class KeywordIn(BaseModel):
+    image_id: int | None = None
+    scope: dict | None = None
     keyword_id: int | None = None
     category: str | None = None
     name: str | None = None
@@ -701,7 +878,7 @@ def _keyword_from(conn: sqlite3.Connection, body: KeywordIn) -> int:
     cat, name = body.category.strip(), body.name.strip()
     if keywords.kind_of(cat, conn) == "person":
         name = keywords.keyword_name(name)  # 'Ann Smith' -> 'AnnSmith', the collection's style
-    return keywords.ensure(conn, cat, name)
+    return keywords.ensure(conn, cat, name, in_vocab=True)
 
 
 @app.post("/api/keywords")
@@ -713,11 +890,15 @@ def keyword_create(body: KeywordIn, conn=Conn):
 
 
 @app.post("/api/photos/{photo_id}/keywords")
+@version_mutation
 def photo_keyword_add(photo_id: int, body: KeywordIn, conn=Conn):
     """Add a keyword to a photo (and its file). New keywords need category + name."""
     kid = _keyword_from(conn, body)
-    if not actions.add_photo_keyword(conn, photo_id, kid):
-        raise HTTPException(409, "Already on this photo, or the file could not be written")
+    try:
+        sharing.add(conn, photo_id, kid, body.image_id, body.scope)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    sharing.update_pending(conn)
     conn.commit()
     actions.resuggest(conn)  # a new person keyword narrows who the faces can be
     actions.auto_branches(conn, {photo_id})
@@ -725,11 +906,21 @@ def photo_keyword_add(photo_id: int, body: KeywordIn, conn=Conn):
 
 
 @app.delete("/api/photos/{photo_id}/keywords/{keyword_id}")
-def photo_keyword_remove(photo_id: int, keyword_id: int, conn=Conn):
+@version_mutation
+def photo_keyword_remove(photo_id: int, keyword_id: int, image_id: int | None = None, conn=Conn):
     """Remove a keyword from a photo and its file - including ones that were already
     in the file (the UI asks first; `pm baseline restore` brings them back in testing)."""
-    if not actions.remove_photo_keyword(conn, photo_id, keyword_id, only_app=False):
-        raise HTTPException(404, "Not on this photo, or the file could not be written")
+    try:
+        if image_id is not None:
+            if not conn.execute('SELECT 1 FROM images WHERE id=? AND photo_id=?', (image_id, photo_id)).fetchone():
+                raise ValueError('Choose an image in this photograph')
+            sharing.write_one(conn, image_id, keyword_id, False, only_app=False)
+            sharing.exception(conn, image_id, keyword_id, False)
+        else:
+            sharing.remove(conn, photo_id, keyword_id, only_app=False)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    sharing.update_pending(conn)
     conn.commit()
     actions.resuggest(conn)
     actions.auto_branches(conn, {photo_id})
@@ -745,6 +936,7 @@ class PhotoIn(BaseModel):
 
 
 @app.patch("/api/photos/{photo_id}")
+@version_mutation
 def photo_update(photo_id: int, body: PhotoIn, conn=Conn):
     try:
         actions.update_photo(conn, photo_id, body.model_dump(exclude_unset=True))
@@ -779,6 +971,7 @@ class BatchEditIn(BaseModel):
 
 
 @app.post("/api/photos/batch-edit")
+@version_mutation
 def photos_batch_edit(body: BatchEditIn, conn=Conn):
     """Apply the same changes to many photos (DB and files). Only fields the client
     sends are changed - the editor leaves '<mixed>' fields out."""
@@ -812,31 +1005,44 @@ class IngestJob:
         self.lock = threading.Lock()
         self.state: dict = {"running": False}
 
-    def start(self, folder: Path) -> bool:
+    def start(self, folder: Path, *, selected_folders: bool | None = None, face_rescan: bool = False) -> bool:
         with self.lock:
             if self.state.get("running"):
                 return False
             self.state = {"running": True, "stage": "Starting", "done": 0, "total": 0,
                           "result": None, "error": None}
-        threading.Thread(target=self._run, args=(folder,), daemon=True).start()
+            if face_rescan:
+                self.state["rescan_folder"] = folder.name or str(folder)
+        threading.Thread(target=self._run, args=(folder, selected_folders, face_rescan), daemon=True).start()
         return True
 
     def _progress(self, stage: str, done: int, total: int) -> None:
         self.state.update(stage=stage, done=done, total=total)
 
-    def _run(self, folder: Path) -> None:
-        conn = db.connect(_need_library())
-        try:
-            result = ingest.ingest(conn, folder, library.thumbs_dir(), progress=self._progress)
-            self._progress("Updating suggestions", 0, 0)
-            result["suggestions"] = match.suggest(conn)
-            result["clusters"] = cluster.cluster(conn)
-            self.state.update(result=result)
-        except Exception as e:  # report to UI instead of dying silently
-            self.state.update(error=str(e))
-        finally:
-            conn.close()
-            self.state["running"] = False
+    def _run(self, folder: Path, selected_folders: bool | None, face_rescan: bool) -> None:
+        with variations.LOCK:
+            conn = db.connect(_need_library())
+            try:
+                if face_rescan:
+                    scanned, found = ingest.scan_faces(
+                        conn, db.library_root(conn).resolve(), library.thumbs_dir(),
+                        progress=self._progress, folder=folder, rescan="all")
+                    result = {"scanned": scanned, "faces": found, "added": 0, "duplicates": 0, "dated": 0}
+                else:
+                    result = ingest.ingest(conn, folder, library.thumbs_dir(), progress=self._progress,
+                                           selected_folders=selected_folders)
+                self._progress("Updating suggestions", 0, 0)
+                result["suggestions"] = match.suggest(conn)
+                result["clusters"] = cluster.cluster(conn)
+                if not face_rescan:
+                    audit = sharing.update_pending(conn)
+                    result.update(keyword_differences=sharing.difference_count(audit), keyword_choices=len(audit['choices']), keyword_errors=len(audit['errors']), variation_issues=len(audit['grouping_issues']))
+                self.state.update(result=result)
+            except Exception as e:  # report to UI instead of dying silently
+                self.state.update(error=str(e))
+            finally:
+                conn.close()
+                self.state["running"] = False
 
 
 JOB = IngestJob()
@@ -844,18 +1050,59 @@ JOB = IngestJob()
 
 @app.post("/api/ingest")
 def ingest_start(conn=Conn):
-    """Scan the whole library folder for new files."""
+    """Scan for new files in the library's selected folders."""
     root = db.get_setting(conn, "library_root")
     if root is None:
         raise HTTPException(400, "No library folder yet - create a library first")
     if not JOB.start(Path(root)):
-        raise HTTPException(409, "An import is already running")
+        raise HTTPException(409, "A scan is already running")
     return JOB.state
 
 
 @app.get("/api/ingest/status")
 def ingest_status():
     return JOB.state
+
+
+class FolderChoice(BaseModel):
+    path: str
+    flag: Literal["learn", "identify"]
+    enabled: bool
+
+
+class FolderRescan(BaseModel):
+    path: str
+
+
+@app.post("/api/folders/rescan-faces")
+def folder_rescan_faces(body: FolderRescan, conn=Conn):
+    try:
+        folder = folders.folder_path(db.library_root(conn).resolve(), body.path)
+    except (ValueError, OSError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not JOB.start(folder, face_rescan=True):
+        raise HTTPException(409, "A scan is already running")
+    return JOB.state
+
+
+@app.get("/api/folders")
+def folder_list(conn=Conn):
+    return folders.tree(conn)
+
+
+@app.put("/api/folders")
+@version_mutation
+def folder_choose(body: FolderChoice, conn=Conn):
+    try:
+        folders.folder_path(db.library_root(conn).resolve(), body.path)
+    except (ValueError, OSError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    policy = folders.load(conn)
+    policy.choose(body.path, body.flag, body.enabled)
+    policy.save(conn)
+    match.suggest(conn)
+    cluster.cluster(conn)
+    return folders.tree(conn)
 
 
 @app.post("/api/upload")
@@ -883,28 +1130,248 @@ def upload(files: list[UploadFile] = File(...), conn=Conn):
             shutil.copyfileobj(f.file, out)
         saved.append(target.name)
     if saved:
-        JOB.start(dest)
+        JOB.start(dest, selected_folders=False)
     return {"saved": len(saved), "skipped": skipped, "folder": dest.relative_to(root).as_posix()}
 
 
 # ---------------------------------------------------------------- images
 
-@app.get("/api/images/{image_id}")
-def image(image_id: int, size: str = "large", conn=Conn):
+def _image_source(conn, image_id: int) -> Path:
     row = conn.execute("SELECT path FROM images WHERE id = ?", (image_id,)).fetchone()
-    if row is None or size not in SIZES:
+    if row is None:
         raise HTTPException(404)
-    cached = library.cache_dir() / size / f"{image_id}.jpg"
-    if not cached.exists():
-        src = db.library_root(conn) / row["path"]
-        if not src.exists():
-            raise HTTPException(404, f"missing file {row['path']}")
-        cached.parent.mkdir(parents=True, exist_ok=True)
-        img = ImageOps.exif_transpose(Image.open(src)).convert("RGB")
-        img.thumbnail((SIZES[size], SIZES[size]), Image.LANCZOS)
-        img.save(cached, quality=85)
-    return FileResponse(cached, headers={"Cache-Control": "max-age=86400"})  # URL carries ?v=<db_token>
+    return db.library_root(conn) / row["path"]
 
+
+def _preview_cache(image_id: int, size: str) -> Path:
+    return library.cache_dir() / size / f"{image_id}.jpg"
+
+
+def _render_preview(source: Path, cached: Path, size: str) -> None:
+    with Image.open(source) as original:
+        img = ImageOps.exif_transpose(original).convert("RGB")
+    img.thumbnail((SIZES[size], SIZES[size]), Image.LANCZOS)
+    cached.parent.mkdir(parents=True, exist_ok=True)
+    with NamedTemporaryFile(dir=cached.parent, suffix=".jpg", delete=False) as output:
+        temp = Path(output.name)
+        try:
+            img.save(output, format="JPEG", quality=85)
+            output.close()
+            temp.replace(cached)
+        finally:
+            output.close()
+            temp.unlink(missing_ok=True)
+
+
+@app.get("/api/images/{image_id}")
+def image(image_id: int, request: Request, size: str = "large", conn=Conn):
+    if size not in SIZES:
+        raise HTTPException(404)
+    source = _image_source(conn, image_id)
+    cached = _preview_cache(image_id, size)
+    try:
+        cache_stat = cached.stat()
+    except FileNotFoundError:
+        cache_stat = None
+    try:
+        source_stat = source.stat()
+    except FileNotFoundError as exc:
+        if cache_stat is None:
+            raise HTTPException(404, f"missing file {source.name}") from exc
+    else:
+        source_changed = max(source_stat.st_mtime_ns, source_stat.st_ctime_ns)
+        if cache_stat is None or cache_stat.st_mtime_ns < source_changed:
+            _render_preview(source, cached, size)
+            cache_stat = cached.stat()
+    response = FileResponse(cached, stat_result=cache_stat, headers={"Cache-Control": "no-cache"})
+    if request.headers.get("if-none-match") == response.headers["etag"]:
+        return Response(status_code=304, headers={"Cache-Control": "no-cache", "ETag": response.headers["etag"]})
+    return response
+
+
+@app.post("/api/images/{image_id}/refresh-preview")
+def refresh_preview(image_id: int, conn=Conn):
+    source = _image_source(conn, image_id)
+    try:
+        for size in SIZES:
+            _render_preview(source, _preview_cache(image_id, size), size)
+    except OSError as exc:
+        raise HTTPException(400, f"Could not refresh the preview for {source.name}: {exc}") from exc
+    return {"revision": str(time.time_ns())}
+
+
+@app.post("/api/images/{image_id}/show-in-finder")
+def show_in_finder(image_id: int, request: Request, conn=Conn):
+    if sys.platform != "darwin":
+        raise HTTPException(400, "Show in Finder is available on macOS")
+    # A JSON request prevents other sites from launching Finder through a simple form post.
+    if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
+        raise HTTPException(415, "Send a JSON request to show a photo in Finder")
+    source = _image_source(conn, image_id)
+    try:
+        path = source.resolve(strict=True)
+    except OSError as exc:
+        raise HTTPException(404, f"Could not find {source.name}") from exc
+    if not path.is_relative_to(db.library_root(conn).resolve()) or not path.is_file():
+        raise HTTPException(404, f"Could not find {source.name} in this library")
+    try:
+        subprocess.run(["/usr/bin/open", "-R", str(path)], check=True, capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise HTTPException(500, f"Finder could not reveal {source.name}") from exc
+    return {"ok": True}
+
+
+
+# ---------------------------------------------------------------- versions and keyword sharing
+
+class VariationPlanIn(BaseModel):
+    config: dict
+    token: str | None = None
+    overrides: dict[int, str] | None = None
+
+
+def _idle():
+    if JOB.state.get('running'):
+        raise HTTPException(409, 'Wait for the photo scan to finish before changing grouping or keyword preferences')
+
+
+@app.get('/api/variations')
+def variation_settings(conn=Conn):
+    return {**variations.load(conn), 'overrides': dict(conn.execute('SELECT image_id,group_key FROM image_group_overrides'))}
+
+
+@app.post('/api/variations/pause')
+@version_mutation
+def variation_pause(conn=Conn):
+    import json
+    cfg = variations.load(conn)
+    cfg['enabled'] = False
+    db.set_setting(conn, variations.SETTING, json.dumps(cfg))
+    conn.commit()
+    sharing.update_pending(conn)
+    return cfg
+
+
+@app.post('/api/variations/preview')
+@version_mutation
+def variation_preview(body: VariationPlanIn, conn=Conn):
+    _idle()
+    try:
+        sharing.inventory(conn)
+        return variations.preview(conn, body.config, body.overrides)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post('/api/variations/apply')
+@version_mutation
+def variation_apply(body: VariationPlanIn, conn=Conn):
+    _idle()
+    try:
+        # Re-check before backing up or touching relationships.
+        current = variations.preview(conn, body.config, body.overrides)
+        if current['token'] != body.token:
+            raise ValueError('The library changed; preview the groups again')
+        import time
+        path = Path(conn.execute('PRAGMA database_list').fetchone()[2])
+        backup_path = path.with_name(f'library-before-grouping-{time.time_ns()}.db')
+        with sqlite3.connect(backup_path) as backup:
+            conn.backup(backup)
+        result = variations.apply(conn, body.config, body.token, body.overrides)
+        result['backup'] = str(backup_path)
+        sharing.update_pending(conn)
+        actions.resuggest(conn)
+        return result
+    except ValueError as e:
+        conn.rollback()
+        raise HTTPException(400, str(e))
+
+
+@app.get('/api/sharing')
+def sharing_get(conn=Conn):
+    return sharing.load(conn)
+
+
+@app.put('/api/sharing')
+def sharing_save(body: dict, conn=Conn):
+    _idle()
+    with variations.LOCK:
+        _idle()
+        try:
+            return sharing.save(conn, body)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+
+@app.get('/api/sharing/review')
+def sharing_review(photo_id: int | None = None, conn=Conn):
+    if photo_id is None:
+        return sharing.update_pending(conn)
+    return sharing.review(conn, photo_id)
+
+
+class ReviewIn(BaseModel):
+    selections: list[dict]
+
+
+@app.post('/api/sharing/apply')
+@version_mutation
+def sharing_apply(body: ReviewIn, conn=Conn):
+    _idle()
+    result = sharing.apply_review(conn, body.selections)
+    sharing.update_pending(conn)
+    actions.resuggest(conn)
+    return result
+
+
+class ExclusiveIn(BaseModel):
+    conflict_id: str
+    keep_image_id: int
+    confirm_removals: bool = False
+
+
+@app.post('/api/sharing/keep-one')
+@version_mutation
+def sharing_keep_one(body: ExclusiveIn, conn=Conn):
+    _idle()
+    if not body.confirm_removals:
+        raise HTTPException(400, 'Confirm removing the keyword from the other listed scan variants')
+    try:
+        sharing.resolve_exclusive(conn, body.conflict_id, body.keep_image_id)
+    except (OSError, RuntimeError, ValueError) as e:
+        raise HTTPException(400, str(e))
+    actions.resuggest(conn)
+    return sharing.update_pending(conn)
+
+
+class ScopeIn(BaseModel):
+    scope: dict | None = None
+
+
+@app.put('/api/photos/{photo_id}/keywords/{kid}/scope')
+@version_mutation
+def sharing_photo_scope(photo_id: int, kid: int, body: ScopeIn, conn=Conn):
+    _idle()
+    try:
+        sharing.set_photo_scope(conn, photo_id, kid, body.scope)
+        return sharing.update_pending(conn)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+class ExceptionIn(BaseModel):
+    present: bool | None = None
+
+
+@app.put('/api/images/{image_id}/keywords/{kid}/exception')
+@version_mutation
+def sharing_exception(image_id: int, kid: int, body: ExceptionIn, conn=Conn):
+    _idle()
+    try:
+        sharing.exception(conn, image_id, kid, body.present)
+        return sharing.update_pending(conn)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 # ---------------------------------------------------------------- libraries & facets
 
@@ -959,12 +1426,17 @@ def library_get():
 def fs_list(path: str = ""):
     """Folders under `path` (drives / home when empty) for the folder picker. The server
     only listens on this computer."""
+    home = Path.home()
+    icloud = home / "Library" / "Mobile Documents" / "com~apple~CloudDocs"
+    shortcuts = {"home": str(home)}
+    if sys.platform == "darwin" and icloud.is_dir():
+        shortcuts["icloud"] = str(icloud)
     if not path:
         if os.name == "nt":
             drives = [f"{c}:\\" for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ" if Path(f"{c}:\\").exists()]
             return {"path": "", "parent": None, "dirs": [{"name": d, "path": d} for d in drives],
-                    "images": 0, "has_library": False, "home": str(Path.home())}
-        path = str(Path.home())
+                    "images": 0, "has_library": False, **shortcuts}
+        path = str(home)
     p = Path(path).expanduser()
     if not p.is_dir():
         raise HTTPException(404, f"{path} is not a folder")
@@ -984,21 +1456,35 @@ def fs_list(path: str = ""):
         raise HTTPException(403, f"No permission to read {path}")
     parent = str(p.parent) if p.parent != p else ""
     return {"path": str(p), "parent": parent, "dirs": dirs, "images": images,
-            "has_library": library.has_library(p), "home": str(Path.home())}
+            "has_library": library.has_library(p), **shortcuts}
 
 
 class FolderIn(BaseModel):
     folder: str
 
 
+class InspectIn(FolderIn):
+    staged: bool = False
+    preset: str = "family"
+
+
 @app.post("/api/library/inspect")
-def library_inspect(body: FolderIn):
+def library_inspect(body: InspectIn):
     """Start reading the existing keywords of a folder (read-only). Poll /status."""
     p = Path(body.folder).expanduser()
     if not p.is_dir():
         raise HTTPException(400, f"{body.folder} is not a folder")
     if library.has_library(p):
         return {"existing": True, "folder": str(p.resolve())}
+    if body.staged:
+        if body.preset != "auto" and body.preset not in library.PRESETS:
+            raise HTTPException(400, "Choose an available starting point")
+        try:
+            keyword_file, facets, preset = library.inspect_vocabulary(p, body.preset)
+        except (OSError, UnicodeError) as exc:
+            raise HTTPException(400, f"Could not read Keywords.txt: {exc}") from exc
+        return {"folder": str(p.resolve()), "running": False, "staged": True,
+                "keyword_file": keyword_file, "facets": facets, "preset": preset}
     SCAN.start(p)
     return {"existing": False, **SCAN.state}
 
@@ -1029,6 +1515,7 @@ class CreateIn(BaseModel):
     facets: list[FacetIn]
     import_keywords: bool = True
     curator: str = ""
+    staged: bool = False
 
 
 def _switch_to(root: Path) -> None:
@@ -1044,27 +1531,29 @@ def library_create(body: CreateIn):
         raise HTTPException(409, "An import is running; wait for it to finish")
     root = Path(body.folder).expanduser()
     found = None
-    if body.import_keywords and SCAN.state.get("result") and \
+    if not body.staged and body.import_keywords and SCAN.state.get("result") and \
             Path(SCAN.state["result"]["folder"]) == root.resolve():
         found = SCAN.state["result"]
     try:
-        library.create(root, [f.model_dump() for f in body.facets], found, body.curator)
+        library.create(root, [f.model_dump() for f in body.facets], found, body.curator,
+                       staged=body.staged)
     except FileExistsError as e:
         raise HTTPException(409, str(e))
-    except ValueError as e:
+    except (ValueError, OSError) as e:
         raise HTTPException(400, str(e))
     _switch_to(root.resolve())
-    JOB.start(root.resolve())
+    if not body.staged:
+        JOB.start(root.resolve())
     return library_get()
 
 
 @app.post("/api/library/open")
+@version_mutation
 def library_open(body: FolderIn):
-    if JOB.state.get("running"):
-        raise HTTPException(409, "An import is running; wait for it to finish")
     root = Path(body.folder).expanduser().resolve()
     if not library.has_library(root):
         raise HTTPException(404, f"{root} has no Shoebox Archivist library yet")
+    library.recheck_keyword_suggestions(library.data_dir_for(root) / "library.db")
     _switch_to(root)
     return library_get()
 
@@ -1137,6 +1626,7 @@ def groups_unmapped(conn=Conn):
 
 
 @app.post("/api/groups/resolve")
+@version_mutation
 def groups_resolve(body: GroupIn, conn=Conn):
     """Add an unmapped group as a facet, or leave it alone. Photo files are never changed."""
     if body.action == "leave":
@@ -1179,19 +1669,20 @@ def regroup_plan(body: RegroupIn, conn=Conn):
 
 
 @app.post("/api/regroup/apply")
+@version_mutation
 def regroup_apply(body: RegroupIn, conn=Conn):
     """Convert (writes the photo files, with provenance). Needs confirm=true."""
     if not body.confirm:
         raise HTTPException(400, "Confirm the preview first")
-    if JOB.state.get("running"):
-        raise HTTPException(409, "An import is running; wait for it to finish")
-    return regroup.apply(conn, body.groups)
+    result = regroup.apply(conn, body.groups)
+    sharing.update_pending(conn)
+    return result
 
 
 @app.get("/api/keywords/export")
 def keywords_export(conn=Conn):
     """Keywords.txt for Bridge / Lightroom (Keywords > Import)."""
-    return Response(keywords.export_vocabulary(conn), media_type="text/plain; charset=utf-8",
+    return Response(keywords.export_vocabulary(conn, folders.vocabulary_ids(conn)), media_type="text/plain; charset=utf-8",
                     headers={"Content-Disposition": 'attachment; filename="Keywords.txt"'})
 
 

@@ -44,9 +44,9 @@ Keep each entry under ~8 lines. Link to code, tests, or a doc for detail rather 
 
 ### Data rules
 - **The file keywords are the source of truth.** The app mirrors them. It never invents its own keyword format.
-- **Provenance on every write to an original:** app-added keywords go in `sa:AddedKeywords`, edited fields keep the prior value in `sa:Original*`, and `pm strip` can undo all app edits.
+- **Provenance on every write to an original:** app-added keywords go in `pm:AddedKeywords`, edited fields keep the prior value in `pm:Original*`, and `pm strip` can undo all app edits.
 - **Never touch a Lightroom catalog.**
-- **People are never auto-assigned** from faces. The app suggests, a person confirms.
+- **Face similarity produces suggestions for review.** The **Name from keywords** setting separately governs automatic confirmations from existing person keywords.
 - **Nothing in code or tests assumes one family's names.** Collection-specific structure lives in a library's facets and vocabulary.
 - Dates are EDTF text plus `date_min`/`date_max` (`backend/dates.py`).
 
@@ -61,7 +61,7 @@ Keep each entry under ~8 lines. Link to code, tests, or a doc for detail rather 
 - **Revisit if:** never as a side effect. Only through the explicit remap.
 
 ### Suggest, then confirm, for faces
-- **Decision:** a match is a suggestion. The user confirms individually or in bulk. Rejected suggestions are stored as negative examples. `keyword_autoconfirm` stays off by default.
+- **Decision:** a match is a suggestion. The user confirms individually or in bulk. Rejected suggestions are stored as negative examples. With **Name from keywords** enabled, Shoebox can confirm the only unmatched face from the only unmatched person keyword if every other eligible face on the scan was manually confirmed as a different tagged person. This also covers a single face and single person keyword. Prior rejections are respected.
 - **Why:** relatives look alike, and one wrong auto-assignment propagates into later matches and into the files.
 - **Not this:** auto-assigning above a confidence threshold.
 
@@ -78,7 +78,7 @@ Keep each entry under ~8 lines. Link to code, tests, or a doc for detail rather 
 - **Why:** changing the keyword would rewrite files and split a person's history across two keywords.
 
 ### Originals are changed only with the user's confirmation, and can always be undone
-- **Decision:** the app never edits a photo's metadata silently. Writes are previewed and confirmed, carry provenance (`sa:AddedKeywords`, `sa:Original*`), and `pm strip` reverses them. Real use modifies originals by design; this is how it does so safely.
+- **Decision:** the app never edits a photo's metadata silently. Writes are previewed and confirmed, carry provenance (`pm:AddedKeywords`, `pm:Original*`), and `pm strip` reverses them. Real use modifies originals by design; this is how it does so safely.
 - **What counts as confirmation:** the UI action is the gate. Naming or confirming a face, and saving an edit, are the user's explicit act, so they write to the file immediately. Bulk or indirect changes (regroup, branch keywords) need a preview and a separate confirm. Write failures must be shown to the user, never swallowed (see BACKLOG "Fix first").
 - **Development:** never experiment on the real collection. Work on a copy (`photos-mt`) and use `pm baseline save` / `pm baseline restore` to return it to a known state, so experiments leave no artifacts.
 - **Why:** photos are irreplaceable, and the app is still being changed, so a bug or an experiment must not leave unexplained changes in source files.

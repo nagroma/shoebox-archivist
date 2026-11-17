@@ -17,8 +17,8 @@ function Field({ k, label, data, draft, set, indent, children }: {
       <div>
         {children ?? (typeof v === 'boolean'
           ? <input id={k} type="checkbox" checked={v} onChange={e => set(k, e.target.checked)} />
-          : <input id={k} type="number" value={v as number} style={{ width: 90 }}
-              step={k === 'suggest_threshold' || k === 'cluster_merge_threshold' || k === 'neighbour_threshold' ? 0.01 : 1}
+          : <input autoComplete="off" id={k} type="number" value={v as number} style={{ width: 90 }}
+              step={k === 'suggest_threshold' ? 0.01 : 1}
               onChange={e => set(k, Number(e.target.value))} />)}
       </div>
       <span className="help muted">{data.help[k]}</span>
@@ -68,8 +68,8 @@ export function SettingsPage() {
 
       <section className="card">
         <h2>Face detection</h2>
-        <p className="muted small">Applies to photos scanned from now on. To re-check photos already scanned, run
-          {' '}<code>uv run pm ingest &lt;folder&gt; --rescan</code> (existing faces and names are kept).</p>
+        <p className="muted small">Applies to photos scanned from now on. To re-check a folder, use
+          {' '}<b>Re-scan for faces</b> under <b>Library → Photo folders</b>.</p>
         <Field k="detection_mode" label="Mode" {...props}>
           <select id="detection_mode" value={draft.detection_mode}
             onChange={e => set('detection_mode', e.target.value as Settings['detection_mode'])}>
@@ -94,8 +94,8 @@ export function SettingsPage() {
 
       <section className="card">
         <h2>Scanner copies</h2>
-        <p className="muted small">Epson FastFoto saves a colour-corrected <code>_a</code> copy beside each
-          original. It is the same photo: it shares the original's faces and keywords, which are written to both files.</p>
+        <p className="muted small">This setting applies to corrected copies grouped by an older version of Shoebox.
+          For configured scan families, choose <b>Display by default</b> on the Library page.</p>
         <Field k="show_enhanced" label="Show the corrected copy" {...props} />
       </section>
 

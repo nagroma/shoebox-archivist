@@ -43,15 +43,10 @@ def refresh(conn: sqlite3.Connection, args) -> None:
 
 
 def cmd_ingest(conn, args):
-    if args.rescan or args.rescan_empty:
-        only_empty = "" if args.rescan else "AND id NOT IN (SELECT image_id FROM faces)"
-        n = conn.execute("UPDATE images SET faces_scanned = 0 WHERE role = 'front' "
-                         f"AND faces_scanned = 1 {only_empty}").rowcount
-        conn.commit()
-        print(f"Re-scanning {n} photo(s); existing faces and names are kept")
+    rescan = "all" if args.rescan else "empty" if args.rescan_empty else None
     try:
         ingest.ingest(conn, Path(args.folder), DATA / "thumbs", args.det_size,
-                      thorough=False if args.fast else None)
+                      thorough=False if args.fast else None, rescan=rescan)
     except ValueError as e:
         raise SystemExit(str(e))
     refresh(conn, args)
@@ -165,7 +160,7 @@ def cmd_regroup(conn, args):
 
 
 def cmd_strip(conn, args):
-    """Remove every keyword this app wrote to the files (sa:AddedKeywords)."""
+    """Remove every keyword this app wrote to the files (pm:AddedKeywords)."""
     root = db.library_root(conn)
     n_files = n_kw = 0
     for r in conn.execute("SELECT path FROM images").fetchall():
@@ -188,6 +183,9 @@ def cmd_serve(conn, args):
         library.use_data_dir(args.db.parent)
     else:  # the last library used, else an older ./data folder, else the setup page
         library.open_startup(DATA)
+    active_db = args.db if args.explicit_data else library.db_path()
+    if active_db is not None:
+        library.recheck_keyword_suggestions(active_db)
     shown = library.data_dir()
     print(f"Library data: {shown if shown else 'none yet - choose a folder in the web UI'}")
     url = f"http://127.0.0.1:{args.port}"
@@ -226,9 +224,9 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("folder")
     s.add_argument("--det-size", type=int, default=1024)
     s.add_argument("--rescan-empty", action="store_true",
-                   help="look again for faces in photos where none were found")
+                   help="look again in this folder and its subfolders where no faces were found")
     s.add_argument("--rescan", action="store_true",
-                   help="look again for missed faces in every photo (keeps existing faces/names)")
+                   help="look again in this folder and its subfolders (keeps existing faces and names)")
     s.add_argument("--fast", action="store_true",
                    help="fast detection for this run (default: the mode in Settings)")
     s.set_defaults(func=cmd_ingest)

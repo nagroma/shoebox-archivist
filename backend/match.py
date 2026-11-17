@@ -13,7 +13,7 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
-from . import config, keywords
+from . import config, folders, keywords
 
 # Cosine similarity at or above which we suggest a name. ArcFace same-person
 # pairs are typically > 0.4; tune on real data with `evaluate`.
@@ -36,9 +36,11 @@ class Gallery:
     @classmethod
     def load(cls, conn: sqlite3.Connection) -> "Gallery | None":
         rows = conn.execute(
-            "SELECT id, person_id, embedding FROM faces "
-            "WHERE status = 'confirmed' AND person_id IS NOT NULL AND embedding IS NOT NULL"
+            "SELECT f.id, f.person_id, f.embedding, i.path FROM faces f JOIN images i ON i.id=f.image_id "
+            "WHERE i.recognition_enabled=1 AND f.status = 'confirmed' AND f.person_id IS NOT NULL AND f.embedding IS NOT NULL"
         ).fetchall()
+        policy = folders.load(conn)
+        rows = [r for r in rows if policy.image(r['path'], 'learn')]
         if not rows:
             return None
         return cls(np.array([r["id"] for r in rows]),
@@ -72,30 +74,49 @@ def _impossible_people(conn: sqlite3.Connection) -> dict[int, set[int]]:
     return out
 
 
-def label_from_keywords(conn: sqlite3.Connection, confirm: bool = True) -> int:
-    """A photo keyworded with exactly one person that shows exactly one face: that
-    face is the person. The name was already confirmed by whoever keyworded the
-    photo; we only infer which face it belongs to. Rejections are respected.
-    With confirm=False the face is only *suggested* (source 'keyword'), for a person to
-    confirm in bulk."""
-    rows = conn.execute("""
-        SELECT i.photo_id, MIN(f.id) AS face_id, COUNT(*) AS n,
-               MAX(f.status = 'confirmed') AS has_confirmed
+def label_from_keywords(conn: sqlite3.Connection, *, confirm: bool = True,
+                        photo_ids: set[int] | None = None, suggestions_only: bool = False) -> int:
+    """Name or suggest the only unmatched face when one tagged person remains.
+
+    For a group photo, every other eligible face on the scan must have been
+    manually confirmed as a different tagged person.
+    """
+    if photo_ids is not None and not photo_ids:
+        return 0
+    scope = "" if photo_ids is None else f"AND i.photo_id IN ({','.join('?' for _ in photo_ids)})"
+    suggested = "AND SUM(f.status = 'suggested') = 1" if suggestions_only else ""
+    rows = conn.execute(f"""
+        SELECT i.photo_id, COUNT(*) AS n, MIN(i.path) AS path,
+               MIN(CASE WHEN f.status != 'confirmed' THEN f.id END) AS face_id,
+               GROUP_CONCAT(CASE WHEN f.status = 'confirmed' THEN f.person_id END) AS confirmed_people
         FROM faces f JOIN images i ON i.id = f.image_id
-        WHERE i.role = 'front' AND f.status != 'ignored' AND f.candidate = 0
-        GROUP BY i.photo_id HAVING n = 1""").fetchall()
+        WHERE i.role = 'front' AND i.recognition_enabled=1 AND f.status != 'ignored' AND f.candidate = 0
+              {scope}
+        GROUP BY i.photo_id
+        HAVING MIN(i.id) = MAX(i.id)
+            AND SUM(f.status != 'confirmed') = 1
+            AND COUNT(CASE WHEN f.status = 'confirmed' AND f.label_source = 'user' THEN 1 END) = n - 1
+            {suggested}
+        """, tuple(photo_ids or ())).fetchall()
     n = 0
+    policy = folders.load(conn)
     for r in rows:
-        people = keywords.photo_people(conn, r["photo_id"])
-        if len(people) != 1 or r["has_confirmed"]:
+        if not policy.image(r['path'], 'identify'):
             continue
-        pid = next(iter(people))
+        people = keywords.photo_people(conn, r["photo_id"])
+        if len(people) != r["n"]:
+            continue
+        confirmed = {int(pid) for pid in (r["confirmed_people"] or "").split(",") if pid}
+        if len(confirmed) != r["n"] - 1 or not confirmed <= people:
+            continue
+        pid = next(iter(people - confirmed))
         if conn.execute("SELECT 1 FROM rejections WHERE face_id = ? AND person_id = ?",
                         (r["face_id"], pid)).fetchone():
             continue
         conn.execute("UPDATE faces SET person_id = ?, status = ?, confidence = NULL, "
-                     "label_source = 'keyword' WHERE id = ?",
-                     (pid, "confirmed" if confirm else "suggested", r["face_id"]))
+                     "label_source = ? WHERE id = ?",
+                     (pid, "confirmed" if confirm else "suggested",
+                      "keyword" if confirm else "elimination", r["face_id"]))
         n += 1
     conn.commit()
     return n
@@ -115,24 +136,27 @@ def suggest(conn: sqlite3.Connection, threshold: float | None = None) -> int:
     conn.execute("UPDATE faces SET person_id = NULL, confidence = NULL, status = 'unknown', "
                  "label_source = NULL WHERE status = 'suggested'")
     cfg = config.load(conn)
+    keywords.link_flat_people(conn)
     if threshold is None:
         threshold = cfg["suggest_threshold"]
-    label_from_keywords(conn, confirm=cfg["keyword_autoconfirm"])
+    keyword_count = label_from_keywords(conn, confirm=cfg["keyword_autoconfirm"])
     gallery = Gallery.load(conn)
     rejected: dict[int, set[int]] = defaultdict(set)
     for r in conn.execute("SELECT face_id, person_id FROM rejections"):
         rejected[r["face_id"]].add(r["person_id"])
     impossible = _impossible_people(conn)
 
-    rows = conn.execute("SELECT f.id, f.image_id, i.photo_id, f.embedding FROM faces f "
+    rows = conn.execute("SELECT f.id, f.image_id, i.photo_id, i.path, f.embedding FROM faces f "
                         "JOIN images i ON i.id = f.image_id "
-                        "WHERE f.status = 'unknown' AND f.candidate = 0 "
+                        "WHERE i.recognition_enabled=1 AND f.status = 'unknown' AND f.candidate = 0 "
                         "AND f.embedding IS NOT NULL").fetchall()
     by_photo: dict[int, list] = defaultdict(list)
+    policy = folders.load(conn)
     for r in rows:
-        by_photo[r["photo_id"]].append(r)
+        if policy.image(r['path'], 'identify'):
+            by_photo[r["photo_id"]].append(r)
 
-    n = 0
+    n = 0 if cfg["keyword_autoconfirm"] else keyword_count
     for photo_id, faces in by_photo.items():
         named = {x[0] for x in conn.execute(
             "SELECT f.person_id FROM faces f JOIN images i ON i.id = f.image_id "

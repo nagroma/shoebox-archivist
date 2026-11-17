@@ -7,8 +7,8 @@ names under `Family`. Converting one keyword gives two:
     Ashdown|JuliaAshdown  ->  People|JuliaAshdown  +  Family|Ashdown
 
 `plan` changes nothing and says what would happen; `apply` does it. The old keyword is
-removed from the file with provenance (sa:RemovedKeywords; `pm strip` puts it back) and the
-new ones are listed in sa:AddedKeywords. Nothing here runs without a caller asking for it.
+removed from the file with provenance (pm:RemovedKeywords; `pm strip` puts it back) and the
+new ones are listed in pm:AddedKeywords. Nothing here runs without a caller asking for it.
 
 This is a migration *option*: the owner's own structure keeps people under `Ashdown|` / `Marlowe|` /
 `AshdownMarlowe|` and uses `People` only for people outside those families (docs/KEYWORD_STRATEGY.md).
