@@ -183,6 +183,9 @@ def cmd_serve(conn, args):
         library.use_data_dir(args.db.parent)
     else:  # the last library used, else an older ./data folder, else the setup page
         library.open_startup(DATA)
+    active_db = args.db if args.explicit_data else library.db_path()
+    if active_db is not None:
+        library.recheck_keyword_suggestions(active_db)
     shown = library.data_dir()
     print(f"Library data: {shown if shown else 'none yet - choose a folder in the web UI'}")
     url = f"http://127.0.0.1:{args.port}"

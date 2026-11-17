@@ -5,7 +5,7 @@ import sqlite3
 import sys
 from collections.abc import Iterable
 
-from . import dates, db, family, keywords, match, xmp, sharing
+from . import config, dates, db, family, keywords, match, xmp, sharing
 
 
 def _many(conn: sqlite3.Connection, sql: str, ids: Iterable[int], *extra) -> None:
@@ -238,11 +238,19 @@ def reject_person(conn: sqlite3.Connection, face_ids: list[int], person_id: int)
 
 def ignore(conn: sqlite3.Connection, face_ids: list[int]) -> None:
     """Not worth naming: strangers, paintings, false detections."""
+    affected = set()
+    if face_ids and config.get(conn, "keyword_autoconfirm"):
+        affected = {row[0] for row in conn.execute(
+            "SELECT DISTINCT i.photo_id FROM faces f JOIN images i ON i.id = f.image_id "
+            "WHERE f.status != 'ignored' AND f.candidate = 0 AND i.recognition_enabled = 1 "
+            f"AND i.role = 'front' AND f.id IN ({_ids_sql(face_ids)})", face_ids)}
     before = _confirmed_pairs(conn, face_ids)
     _many(conn, "UPDATE faces SET status = 'ignored', person_id = NULL, confidence = NULL, "
                 "cluster_id = NULL WHERE id = ?", face_ids)
     conn.commit()
     _sync_keywords(conn, before)
+    if affected:
+        match.label_from_keywords(conn, photo_ids=affected)
 
 
 def verify_faces(conn: sqlite3.Connection, face_ids: list[int]) -> None:

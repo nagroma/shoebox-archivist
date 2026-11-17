@@ -1548,12 +1548,12 @@ def library_create(body: CreateIn):
 
 
 @app.post("/api/library/open")
+@version_mutation
 def library_open(body: FolderIn):
-    if JOB.state.get("running"):
-        raise HTTPException(409, "An import is running; wait for it to finish")
     root = Path(body.folder).expanduser().resolve()
     if not library.has_library(root):
         raise HTTPException(404, f"{root} has no Shoebox Archivist library yet")
+    library.recheck_keyword_suggestions(library.data_dir_for(root) / "library.db")
     _switch_to(root)
     return library_get()
 

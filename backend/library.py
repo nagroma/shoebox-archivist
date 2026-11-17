@@ -15,9 +15,10 @@ import shutil
 import sqlite3
 from collections import Counter
 from collections.abc import Callable
+from contextlib import closing
 from pathlib import Path
 
-from . import db, folders, ingest, keywords, xmp
+from . import config, db, folders, ingest, keywords, match, xmp
 
 LIB_DIR = ".shoebox"
 
@@ -126,6 +127,13 @@ def open_startup(legacy_dir: Path | None = None) -> Path | None:
     elif legacy_dir and (legacy_dir / "library.db").exists():
         use_data_dir(legacy_dir)
     return _current
+
+
+def recheck_keyword_suggestions(path: Path) -> None:
+    """Resolve saved suggestions that now qualify for Name from keywords."""
+    with closing(db.connect(path)) as conn:
+        if config.get(conn, "keyword_autoconfirm"):
+            match.label_from_keywords(conn, suggestions_only=True)
 
 
 # ------------------------------------------------------------------ inspecting a folder

@@ -74,23 +74,30 @@ def _impossible_people(conn: sqlite3.Connection) -> dict[int, set[int]]:
     return out
 
 
-def label_from_keywords(conn: sqlite3.Connection, *, confirm: bool = True) -> int:
+def label_from_keywords(conn: sqlite3.Connection, *, confirm: bool = True,
+                        photo_ids: set[int] | None = None, suggestions_only: bool = False) -> int:
     """Name or suggest the only unmatched face when one tagged person remains.
 
     For a group photo, every other eligible face on the scan must have been
     manually confirmed as a different tagged person.
     """
-    rows = conn.execute("""
+    if photo_ids is not None and not photo_ids:
+        return 0
+    scope = "" if photo_ids is None else f"AND i.photo_id IN ({','.join('?' for _ in photo_ids)})"
+    suggested = "AND SUM(f.status = 'suggested') = 1" if suggestions_only else ""
+    rows = conn.execute(f"""
         SELECT i.photo_id, COUNT(*) AS n, MIN(i.path) AS path,
                MIN(CASE WHEN f.status != 'confirmed' THEN f.id END) AS face_id,
                GROUP_CONCAT(CASE WHEN f.status = 'confirmed' THEN f.person_id END) AS confirmed_people
         FROM faces f JOIN images i ON i.id = f.image_id
         WHERE i.role = 'front' AND i.recognition_enabled=1 AND f.status != 'ignored' AND f.candidate = 0
+              {scope}
         GROUP BY i.photo_id
         HAVING MIN(i.id) = MAX(i.id)
             AND SUM(f.status != 'confirmed') = 1
             AND COUNT(CASE WHEN f.status = 'confirmed' AND f.label_source = 'user' THEN 1 END) = n - 1
-        """).fetchall()
+            {suggested}
+        """, tuple(photo_ids or ())).fetchall()
     n = 0
     policy = folders.load(conn)
     for r in rows:

@@ -138,6 +138,79 @@ def test_confirming_first_face_auto_confirms_last_tagged_person(conn, tmp_path):
     assert (tmp_path / "pair.jpg").read_bytes() == before
 
 
+@pytest.mark.parametrize("enabled", [True, False])
+def test_ignoring_an_extra_detection_rechecks_only_the_affected_photo(conn, tmp_path, enabled):
+    from backend import api
+
+    tags = ["People|AnnExample", "Families|ExampleFamily"]
+    _, seed = photo(conn, tmp_path, "seed.jpg", grouped=tags)
+    _, target = photo(conn, tmp_path, "target.jpg", grouped=tags)
+    face(conn, seed)
+    remaining, ignored = face(conn, target), face(conn, target, 1)
+    ingest.read_metadata(conn, tmp_path, progress=lambda *args: None)
+    match.suggest(conn)
+    pid = conn.execute("SELECT id FROM people WHERE name='Ann Example'").fetchone()[0]
+    assert state(conn, remaining) == ("suggested", pid, "keyword_match")
+
+    _, unrelated = photo(conn, tmp_path, "unrelated.jpg", grouped=tags)
+    unrelated_face = face(conn, unrelated)
+    ingest.read_metadata(conn, tmp_path, progress=lambda *args: None)
+    config.save(conn, {"keyword_autoconfirm": enabled})
+    before = (tmp_path / "target.jpg").read_bytes()
+
+    api.faces_ignore(api.FacesIn(face_ids=[ignored]), conn)
+
+    expected = ("confirmed", pid, "keyword") if enabled else ("suggested", pid, "keyword_match")
+    assert state(conn, remaining) == expected
+    assert state(conn, ignored)[0] == "ignored"
+    assert state(conn, unrelated_face) == ("unknown", None, None)
+    assert (tmp_path / "target.jpg").read_bytes() == before
+
+
+@pytest.mark.parametrize("entry", ["startup", "library page"])
+@pytest.mark.parametrize("enabled", [True, False])
+def test_opening_library_rechecks_saved_keyword_suggestions(tmp_path, monkeypatch, entry, enabled):
+    import uvicorn
+    from contextlib import closing
+    from backend import api, cli, library
+
+    monkeypatch.setenv("PM_HOME", str(tmp_path / "state"))
+    monkeypatch.setattr(library, "_current", None)
+    monkeypatch.setattr(uvicorn, "run", lambda *args, **kwargs: None)
+    root = tmp_path / "photos"
+    root.mkdir()
+    path = library.create(root, [{"name": "People", "kind": "person"}]) / "library.db"
+    tags = ["People|AnnExample", "Families|ExampleFamily"]
+
+    with closing(db.connect(path)) as conn:
+        _, seed = photo(conn, root, "seed.jpg", grouped=tags)
+        _, target = photo(conn, root, "target.jpg", grouped=tags)
+        _, other = photo(conn, root, "other.jpg", grouped=tags)
+        face(conn, seed)
+        remaining, ignored = face(conn, target), face(conn, target, 1)
+        unknown = face(conn, other)
+        ingest.read_metadata(conn, root, progress=lambda *args: None)
+        pid = conn.execute("SELECT id FROM people WHERE name='Ann Example'").fetchone()[0]
+        conn.execute("UPDATE faces SET status='suggested', person_id=?, label_source='keyword_match' WHERE id=?",
+                     (pid, remaining))
+        conn.execute("UPDATE faces SET status='ignored' WHERE id=?", (ignored,))
+        config.save(conn, {"keyword_autoconfirm": enabled})
+    before = (root / "target.jpg").read_bytes()
+
+    if entry == "startup":
+        library.remember(root)
+        cli.main(["serve", "--no-browser"])
+    else:
+        api.library_open(api.FolderIn(folder=str(root)))
+
+    with closing(db.connect(path)) as conn:
+        expected = ("confirmed", pid, "keyword") if enabled else ("suggested", pid, "keyword_match")
+        assert state(conn, remaining) == expected
+        assert state(conn, ignored)[0] == "ignored"
+        assert state(conn, unknown) == ("unknown", None, None)
+    assert (root / "target.jpg").read_bytes() == before
+
+
 @pytest.mark.parametrize("condition", ["disabled", "rejected", "automatic-anchor", "extra-face", "extra-tag"])
 def test_last_face_auto_confirmation_requires_an_unambiguous_manual_anchor(conn, tmp_path, condition):
     tags = ["People|AnnExample", "People|BenExample"]
